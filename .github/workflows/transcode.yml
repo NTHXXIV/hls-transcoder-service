@@ -1,0 +1,33 @@
+name: HLS Transcoder Service
+
+on:
+  repository_dispatch:
+    types: [build-hls]
+
+jobs:
+  transcode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Run Transcoder
+        env:
+          TRANSCODER_PRIVATE_KEY: ${{ secrets.TRANSCODER_PRIVATE_KEY }}
+        run: |
+          # Ghi payload ra file để script đọc trực tiếp, tránh rò rỉ qua ENV
+          echo '${{ toJson(github.event.client_payload) }}' > payload.json
+          
+          # Chạy transcoder với file payload
+          npx tsx src/index.ts payload.json
