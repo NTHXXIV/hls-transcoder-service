@@ -29,6 +29,9 @@ jobs:
           HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX: ${{ secrets.HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX }}
           HLS_CALLBACK_SECRET_STAGAPPS_PROD: ${{ secrets.HLS_CALLBACK_SECRET_STAGAPPS_PROD }}
         run: |
+          echo "Callback URL: ${{ github.event.client_payload.callback_url }}"
+          echo "Callback client: ${{ github.event.client_payload.callback_client_id }}"
+
           # Ghi payload ra file để script đọc trực tiếp, tránh rò rỉ qua ENV
           echo '${{ toJson(github.event.client_payload) }}' > payload.json
 
