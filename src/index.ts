@@ -1,4 +1,9 @@
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectsCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { spawn } from "node:child_process";
 import {
   createReadStream,
@@ -100,6 +105,43 @@ async function sendCallback(body: Record<string, unknown>) {
   }
 }
 
+async function cleanupPrefix(client: S3Client, bucket: string, prefix: string) {
+  const listPrefix = `${prefix.replace(/\/$/, "")}/`;
+
+  while (true) {
+    const listResponse = await client.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: listPrefix,
+      }),
+    );
+
+    const objects = listResponse.Contents ?? [];
+    if (objects.length === 0) {
+      break;
+    }
+
+    for (let index = 0; index < objects.length; index += 1000) {
+      const chunk = objects.slice(index, index + 1000);
+      await client.send(
+        new DeleteObjectsCommand({
+          Bucket: bucket,
+          Delete: {
+            Objects: chunk
+              .filter((object) => object.Key)
+              .map((object) => ({ Key: object.Key! })),
+            Quiet: true,
+          },
+        }),
+      );
+    }
+
+    if (!listResponse.IsTruncated) {
+      break;
+    }
+  }
+}
+
 // Giải mã Key R2 nếu chúng được mã hóa
 const ACCESS_KEY_ID = decrypt(TARGET_R2_CONFIG.access_key_id);
 const SECRET_ACCESS_KEY = decrypt(TARGET_R2_CONFIG.secret_access_key);
@@ -194,6 +236,9 @@ async function runTranscode() {
     await fs.writeFile(path.join(workingDir, "master.m3u8"), masterPlaylist);
 
     console.log(`☁️  Uploading to R2...`);
+    console.log(`🧹 Cleaning existing objects under prefix: ${TARGET_R2_CONFIG.prefix}`);
+    await cleanupPrefix(client, TARGET_R2_CONFIG.bucket, TARGET_R2_CONFIG.prefix);
+
     const files = await listFilesRecursive(workingDir);
     const uploadedKeys: string[] = [];
     for (const filePath of files) {
