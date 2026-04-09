@@ -3,6 +3,7 @@
 Hệ thống băm video sang HLS (Adaptive Bitrate) sử dụng máy ảo GitHub Actions để xử lý FFmpeg miễn phí.
 
 ## 🚀 Tính năng chính
+
 - Tự động băm video sang 480p, 720p, 1080p (tùy chỉnh).
 - Hỗ trợ mã hóa RSA cho các Key R2 nhạy cảm (Không lộ key trong log).
 - Tự động upload lên Cloudflare R2 sau khi băm xong.
@@ -13,10 +14,11 @@ Hệ thống băm video sang HLS (Adaptive Bitrate) sử dụng máy ảo GitHub
 Để bảo mật tuyệt đối, bạn nên mã hóa `access_key_id` và `secret_access_key` của R2 trước khi gửi payload.
 
 1. **Tạo cặp khóa RSA:**
+
    ```bash
    # Tạo khóa riêng (Private Key)
    openssl genrsa -out private.pem 2048
-   
+
    # Trích xuất khóa công khai (Public Key)
    openssl rsa -in private.pem -pubout -out public.pem
    ```
@@ -32,6 +34,14 @@ Hệ thống băm video sang HLS (Adaptive Bitrate) sử dụng máy ảo GitHub
 
 ## 📡 Cách Trigger từ bên ngoài
 
+Callback webhook hỗ trợ 2 chế độ:
+
+- Single secret: đặt `HLS_CALLBACK_SECRET`.
+- Multi-client secret: đặt `HLS_CALLBACK_SECRET_<CALLBACK_CLIENT_ID>` theo dạng biến môi trường đã chuẩn hóa.
+
+Ví dụ với `callback_client_id = "stagapps-sandbox"` thì secret cần set là `HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX`.
+Trong GitHub repo transcoder, có thể tạo sẵn các secret như `HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX` và `HLS_CALLBACK_SECRET_STAGAPPS_PROD` để dùng cho các payload tương ứng.
+
 Gửi một POST request tới GitHub API:
 
 ```bash
@@ -43,6 +53,8 @@ curl -X POST \
     "event_type": "build-hls",
     "client_payload": {
       "source_url": "https://domain.com/source.mp4",
+      "lesson_id": "lesson-123",
+      "callback_client_id": "stagapps-sandbox",
       "variants": "480p,720p",
       "callback_url": "https://api.yourdomain.com/hls-done",
       "target_r2_config": {
@@ -56,3 +68,16 @@ curl -X POST \
     }
   }'
 ```
+
+Callback thành công sẽ có schema chính:
+
+- `lessonId`
+- `status: "processing" | "ready" | "failed"`
+- `hlsManifestUrl`
+- `hlsVersion`
+- `prefix`
+- `files`
+- `generatedAt`
+- `sourceMp4Url`
+
+Callback lỗi sẽ trả về `status: "failed"` và `error`.
