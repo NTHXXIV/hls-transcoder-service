@@ -517,8 +517,8 @@ export async function runTranscode() {
     }
 
     await sendCallback(CALLBACK_URL, readyPayload, CALLBACK_CLIENT_ID);
-  } catch (error) {
-    console.error(`❌ Failed:`, error);
+  } catch (error: any) {
+    console.error(`❌ Failed: ${error?.message || String(error)}`);
     try {
       await sendCallback(
         CALLBACK_URL,
@@ -527,17 +527,19 @@ export async function runTranscode() {
           jobId: JOB_ID,
           sourceVersion: SOURCE_VERSION,
           status: "failed",
-          error: String(error instanceof Error ? error.message : error),
+          error: String(error?.message || error),
         },
         CALLBACK_CLIENT_ID,
       );
     } catch (callbackError) {
-      console.error(`❌ Failure callback also failed:`, callbackError);
+      console.error(`❌ Failure callback also failed`);
     } finally {
       process.exit(1);
     }
   } finally {
     await fs.rm(workingDir, { recursive: true, force: true });
+    // Xóa file payload để đảm bảo an toàn
+    await fs.unlink(payloadPath).catch(() => {});
   }
 }
 
