@@ -1,15 +1,72 @@
 import { describe, it, expect, vi } from 'vitest';
+import { spawn } from 'node:child_process';
 import { 
   toSecretKey, 
   resolveCallbackSecret, 
   buildMasterPlaylist, 
   getContentType, 
   decrypt,
-  VARIANT_CATALOG 
+  VARIANT_CATALOG,
+  getVideoDuration
 } from './index.js';
+
+vi.mock('node:child_process', () => ({
+  spawn: vi.fn(),
+}));
 
 describe('HLS Transcoder Utility Functions', () => {
   
+  describe('getVideoDuration', () => {
+    it('should return duration from ffprobe output', async () => {
+      const mockChild = {
+        stdout: {
+          on: vi.fn((event, cb) => {
+            if (event === 'data') cb(Buffer.from('123.456\n'));
+          }),
+        },
+        on: vi.fn((event, cb) => {
+          if (event === 'close') cb(0);
+        }),
+      };
+      (spawn as any).mockReturnValue(mockChild);
+
+      const duration = await getVideoDuration('dummy.mp4');
+      expect(duration).toBe(123.46); // Rounded to 2 decimals
+    });
+
+    it('should return null if ffprobe fails', async () => {
+      const mockChild = {
+        stdout: {
+          on: vi.fn(),
+        },
+        on: vi.fn((event, cb) => {
+          if (event === 'close') cb(1);
+        }),
+      };
+      (spawn as any).mockReturnValue(mockChild);
+
+      const duration = await getVideoDuration('dummy.mp4');
+      expect(duration).toBeNull();
+    });
+
+    it('should return null if duration is invalid', async () => {
+      const mockChild = {
+        stdout: {
+          on: vi.fn((event, cb) => {
+            if (event === 'data') cb(Buffer.from('NaN\n'));
+          }),
+        },
+        on: vi.fn((event, cb) => {
+          if (event === 'close') cb(0);
+        }),
+      };
+      (spawn as any).mockReturnValue(mockChild);
+
+      const duration = await getVideoDuration('dummy.mp4');
+      expect(duration).toBeNull();
+    });
+  });
+
   describe('toSecretKey', () => {
     it('should format callback client id correctly', () => {
       expect(toSecretKey('stagapps-sandbox')).toBe('HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX');

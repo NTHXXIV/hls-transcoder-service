@@ -268,6 +268,42 @@ async function createHlsRenditions(
   });
 }
 
+export async function getVideoDuration(
+  inputPath: string,
+): Promise<number | null> {
+  const args = [
+    "-v",
+    "error",
+    "-show_entries",
+    "format=duration",
+    "-of",
+    "default=noprint_wrappers=1:nokey=1",
+    inputPath,
+  ];
+  return new Promise<number | null>((resolve) => {
+    const child = spawn("ffprobe", args);
+    let output = "";
+    child.stdout.on("data", (data) => (output += data.toString()));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        console.warn(`ffprobe exited with code ${code} for ${inputPath}`);
+        return resolve(null);
+      }
+      const duration = parseFloat(output.trim());
+      if (isNaN(duration) || duration <= 0) {
+        console.warn(`ffprobe returned invalid duration: ${output}`);
+        return resolve(null);
+      }
+      // Round to 2 decimal places
+      resolve(Math.round(duration * 100) / 100);
+    });
+    child.on("error", (err) => {
+      console.warn(`ffprobe error: ${err.message}`);
+      resolve(null);
+    });
+  });
+}
+
 export async function runTranscode() {
   // Đọc payload từ file (được GitHub Action ghi ra)
   const payloadPath = process.argv[2];
@@ -288,9 +324,16 @@ export async function runTranscode() {
   const VARIANTS_CSV = payload.variants || "480p,720p";
   const CALLBACK_URL = payload.callback_url;
   const SEGMENT_SECONDS = Number(payload.segment_seconds) || 6;
+  const SOURCE_VERSION = payload.source_version;
+  const JOB_ID = payload.job_id;
 
   if (!LESSON_ID) {
     console.error("❌ Error: Missing or invalid payload.lesson_id");
+    process.exit(1);
+  }
+
+  if (!TARGET_R2_CONFIG.prefix || TARGET_R2_CONFIG.prefix === "/") {
+    console.error("❌ Error: TARGET_R2_CONFIG.prefix is missing or too broad.");
     process.exit(1);
   }
 
@@ -321,10 +364,16 @@ export async function runTranscode() {
   );
 
   console.log(`🎬 Job started for: ${SOURCE_URL}`);
-  await sendCallback(CALLBACK_URL, {
-    lessonId: LESSON_ID,
-    status: "processing",
-  }, CALLBACK_CLIENT_ID);
+  await sendCallback(
+    CALLBACK_URL,
+    {
+      lessonId: LESSON_ID,
+      jobId: JOB_ID,
+      sourceVersion: SOURCE_VERSION,
+      status: "processing",
+    },
+    CALLBACK_CLIENT_ID,
+  );
 
   const client = new S3Client({
     region: "auto",
@@ -347,6 +396,9 @@ export async function runTranscode() {
       Readable.fromWeb(response.body! as any),
       createWriteStream(localSource),
     );
+
+    const durationSeconds = await getVideoDuration(localSource);
+    console.log(`📏 [${LESSON_ID}] Video duration: ${durationSeconds}s`);
 
     await createHlsRenditions(
       localSource,
@@ -393,24 +445,42 @@ export async function runTranscode() {
       throw new Error("hlsManifestUrl must be an HTTPS URL");
     }
     console.log(`✅ Success: ${masterUrl}`);
-    await sendCallback(CALLBACK_URL, {
+
+    // Derive hlsVersion from prefix (e.g. hls/v3-abc -> v3)
+    const hlsVersionMatch = TARGET_R2_CONFIG.prefix.match(/hls\/(v\d+)/);
+    const hlsVersion = hlsVersionMatch ? hlsVersionMatch[1] : "v2";
+
+    const readyPayload: Record<string, any> = {
       lessonId: LESSON_ID,
+      jobId: JOB_ID,
+      sourceVersion: SOURCE_VERSION,
       status: "ready",
       hlsManifestUrl: masterUrl,
-      hlsVersion: "v2",
+      hlsVersion,
       prefix: TARGET_R2_CONFIG.prefix,
       files: uploadedKeys,
       generatedAt: new Date().toISOString(),
       sourceMp4Url: SOURCE_URL,
-    }, CALLBACK_CLIENT_ID);
+    };
+    if (durationSeconds !== null) {
+      readyPayload.durationSeconds = durationSeconds;
+    }
+
+    await sendCallback(CALLBACK_URL, readyPayload, CALLBACK_CLIENT_ID);
   } catch (error) {
     console.error(`❌ Failed:`, error);
     try {
-      await sendCallback(CALLBACK_URL, {
-        lessonId: LESSON_ID,
-        status: "failed",
-        error: String(error instanceof Error ? error.message : error),
-      }, CALLBACK_CLIENT_ID);
+      await sendCallback(
+        CALLBACK_URL,
+        {
+          lessonId: LESSON_ID,
+          jobId: JOB_ID,
+          sourceVersion: SOURCE_VERSION,
+          status: "failed",
+          error: String(error instanceof Error ? error.message : error),
+        },
+        CALLBACK_CLIENT_ID,
+      );
     } catch (callbackError) {
       console.error(`❌ Failure callback also failed:`, callbackError);
     } finally {
@@ -420,6 +490,7 @@ export async function runTranscode() {
     await fs.rm(workingDir, { recursive: true, force: true });
   }
 }
+
 
 // Only run if this file is the main entry point
 if (import.meta.url === `file://${process.argv[1]}`) {
