@@ -332,8 +332,58 @@ export async function runTranscode() {
     process.exit(1);
   }
 
-  if (!TARGET_R2_CONFIG.prefix || TARGET_R2_CONFIG.prefix === "/") {
-    console.error("❌ Error: TARGET_R2_CONFIG.prefix is missing or too broad.");
+  // 1. Validate Prefix: Phải chứa lesson_id để cô lập dữ liệu
+  if (
+    !TARGET_R2_CONFIG.prefix ||
+    TARGET_R2_CONFIG.prefix === "/" ||
+    !TARGET_R2_CONFIG.prefix.includes(LESSON_ID)
+  ) {
+    console.error(
+      "❌ Error: TARGET_R2_CONFIG.prefix is invalid or does not contain lesson_id.",
+    );
+    process.exit(1);
+  }
+
+  // 2. Validate R2 Endpoint: Chỉ chấp nhận Cloudflare R2
+  try {
+    const endpointUrl = new URL(TARGET_R2_CONFIG.endpoint);
+    if (!endpointUrl.hostname.endsWith(".r2.cloudflarestorage.com")) {
+      throw new Error(`Invalid R2 endpoint domain: ${endpointUrl.hostname}`);
+    }
+  } catch (e: any) {
+    console.error(`❌ Security Error: ${e.message}`);
+    process.exit(1);
+  }
+
+  // 3. Validate Callback URL: Tránh rò rỉ callback secret
+  if (CALLBACK_URL) {
+    try {
+      const cbUrl = new URL(CALLBACK_URL);
+      const allowedDomains = [
+        "stag-edu-backend.vercel.app",
+        "vercel.app", // Cho phép các preview deployments khác của Vercel
+      ];
+      if (!allowedDomains.some((d) => cbUrl.hostname.endsWith(d))) {
+        throw new Error(`Unauthorized callback domain: ${cbUrl.hostname}`);
+      }
+    } catch (e: any) {
+      console.error(`❌ Security Error: ${e.message}`);
+      process.exit(1);
+    }
+  }
+
+  // 4. Validate Source URL: Tránh SSRF
+  try {
+    const sUrl = new URL(SOURCE_URL);
+    if (
+      sUrl.hostname === "localhost" ||
+      sUrl.hostname.startsWith("127.") ||
+      sUrl.hostname.startsWith("169.254.")
+    ) {
+      throw new Error("Potential SSRF detected in source_url");
+    }
+  } catch (e: any) {
+    console.error(`❌ Security Error: ${e.message}`);
     process.exit(1);
   }
 
