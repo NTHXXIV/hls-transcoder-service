@@ -1,11 +1,7 @@
 import {
-  DeleteObjectsCommand,
-  ListObjectsV2Command,
   PutObjectCommand,
-  S3Client,
 } from "@aws-sdk/client-s3";
 import { spawn } from "node:child_process";
-import { constants, privateDecrypt } from "node:crypto";
 import {
   createReadStream,
   createWriteStream,
@@ -17,116 +13,14 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
-export function decrypt(encryptedValue: string, privateKey?: string): string {
-  if (!privateKey) {
-    console.warn("TRANSCODER_PRIVATE_KEY not set, using raw value.");
-    return encryptedValue;
-  }
-  try {
-    const buffer = Buffer.from(encryptedValue, "base64");
-    return privateDecrypt(
-      {
-        key: privateKey,
-        padding: constants.RSA_PKCS1_OAEP_PADDING,
-        oaepHash: "sha256",
-      },
-      buffer,
-    ).toString("utf-8");
-  } catch (e: any) {
-    console.warn(`Decryption failed: ${e.message}. Using raw value.`);
-    return encryptedValue;
-  }
-}
-
-export function toSecretKey(id: string) {
-  return `HLS_CALLBACK_SECRET_${id.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase()}`;
-}
-
-export function resolveCallbackSecret(
-  callbackClientId?: string,
-  env: NodeJS.ProcessEnv = process.env,
-): string {
-  if (!callbackClientId) {
-    const single = env.HLS_CALLBACK_SECRET;
-    if (!single) throw new Error("Missing HLS_CALLBACK_SECRET");
-    return single;
-  }
-
-  const envKey = toSecretKey(callbackClientId);
-  const secret = env[envKey];
-  if (!secret) {
-    throw new Error(`Missing callback secret env: ${envKey}`);
-  }
-  return secret;
-}
-
-export async function sendCallback(
-  callbackUrl: string | undefined,
-  body: Record<string, unknown>,
-  callbackClientId?: string,
-) {
-  if (!callbackUrl) return;
-  try {
-    const callbackSecret = resolveCallbackSecret(callbackClientId);
-
-    const res = await fetch(callbackUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-hls-callback-secret": callbackSecret,
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      console.warn(`Callback failed ${res.status}: ${txt}`);
-    }
-  } catch (error) {
-    console.warn(`Callback request failed:`, error);
-  }
-}
-
-export async function cleanupPrefix(
-  client: S3Client,
-  bucket: string,
-  prefix: string,
-) {
-  const listPrefix = `${prefix.replace(/\/$/, "")}/`;
-
-  while (true) {
-    const listResponse = await client.send(
-      new ListObjectsV2Command({
-        Bucket: bucket,
-        Prefix: listPrefix,
-      }),
-    );
-
-    const objects = listResponse.Contents ?? [];
-    if (objects.length === 0) {
-      break;
-    }
-
-    for (let index = 0; index < objects.length; index += 1000) {
-      const chunk = objects.slice(index, index + 1000);
-      await client.send(
-        new DeleteObjectsCommand({
-          Bucket: bucket,
-          Delete: {
-            Objects: chunk
-              .filter((object) => object.Key)
-              .map((object) => ({ Key: object.Key! })),
-            Quiet: true,
-          },
-        }),
-      );
-    }
-
-    if (!listResponse.IsTruncated) {
-      break;
-    }
-  }
-}
+import { decrypt } from "../shared/crypto.js";
+import { sendCallback, validateCallbackUrl } from "../shared/callback.js";
+import { cleanupPrefix, createR2Client } from "../shared/r2.js";
+import { 
+  getContentType, 
+  getVideoDuration, 
+  listFilesRecursive 
+} from "../shared/utils.js";
 
 export type Variant = {
   name: string;
@@ -172,23 +66,6 @@ export function buildMasterPlaylist(variants: Variant[]) {
       `${v.name}.m3u8`,
     );
   return lines.join("\n") + "\n";
-}
-
-export async function listFilesRecursive(dir: string): Promise<string[]> {
-  const entries = await fs.readdir(dir, { withFileTypes: true });
-  const files = await Promise.all(
-    entries.map(async (e) => {
-      const res = path.resolve(dir, e.name);
-      return e.isDirectory() ? listFilesRecursive(res) : [res];
-    }),
-  );
-  return files.flat();
-}
-
-export function getContentType(p: string) {
-  if (p.endsWith(".m3u8")) return "application/vnd.apple.mpegurl";
-  if (p.endsWith(".ts")) return "video/mp2t";
-  return "application/octet-stream";
 }
 
 async function createHlsRenditions(
@@ -268,44 +145,7 @@ async function createHlsRenditions(
   });
 }
 
-export async function getVideoDuration(
-  inputPath: string,
-): Promise<number | null> {
-  const args = [
-    "-v",
-    "error",
-    "-show_entries",
-    "format=duration",
-    "-of",
-    "default=noprint_wrappers=1:nokey=1",
-    inputPath,
-  ];
-  return new Promise<number | null>((resolve) => {
-    const child = spawn("ffprobe", args);
-    let output = "";
-    child.stdout.on("data", (data) => (output += data.toString()));
-    child.on("close", (code) => {
-      if (code !== 0) {
-        console.warn(`ffprobe exited with code ${code} for ${inputPath}`);
-        return resolve(null);
-      }
-      const duration = parseFloat(output.trim());
-      if (isNaN(duration) || duration <= 0) {
-        console.warn(`ffprobe returned invalid duration: ${output}`);
-        return resolve(null);
-      }
-      // Round to 2 decimal places
-      resolve(Math.round(duration * 100) / 100);
-    });
-    child.on("error", (err) => {
-      console.warn(`ffprobe error: ${err.message}`);
-      resolve(null);
-    });
-  });
-}
-
-export async function runTranscode() {
-  // Đọc payload từ file (được GitHub Action ghi ra)
+export async function runHlsTranscode() {
   const payloadPath = process.argv[2];
   if (!payloadPath) {
     console.error("Missing payload path");
@@ -315,7 +155,6 @@ export async function runTranscode() {
   const payload = JSON.parse(readFileSync(payloadPath, "utf-8"));
   const PRIVATE_KEY = process.env.TRANSCODER_PRIVATE_KEY;
 
-  // Map các giá trị từ payload
   const SOURCE_URL = payload.source_url;
   const LESSON_ID =
     typeof payload.lesson_id === "string" ? payload.lesson_id.trim() : "";
@@ -332,7 +171,6 @@ export async function runTranscode() {
     process.exit(1);
   }
 
-  // 1. Validate Prefix: Phải chứa lesson_id để cô lập dữ liệu
   if (
     !TARGET_R2_CONFIG.prefix ||
     TARGET_R2_CONFIG.prefix === "/" ||
@@ -344,7 +182,6 @@ export async function runTranscode() {
     process.exit(1);
   }
 
-  // 2. Validate R2 Endpoint: Chỉ chấp nhận Cloudflare R2
   try {
     const endpointUrl = new URL(TARGET_R2_CONFIG.endpoint);
     if (!endpointUrl.hostname.endsWith(".r2.cloudflarestorage.com")) {
@@ -354,25 +191,17 @@ export async function runTranscode() {
     console.error(`❌ Security Error: ${e.message}`);
     process.exit(1);
   }
-
-  // 3. Validate Callback URL: Tránh rò rỉ callback secret
-  if (CALLBACK_URL) {
-    try {
-      const cbUrl = new URL(CALLBACK_URL);
-      const allowedDomains = [
-        "stag-edu-backend.vercel.app",
-        "vercel.app", // Cho phép các preview deployments khác của Vercel
-      ];
-      if (!allowedDomains.some((d) => cbUrl.hostname.endsWith(d))) {
-        throw new Error(`Unauthorized callback domain: ${cbUrl.hostname}`);
-      }
-    } catch (e: any) {
-      console.error(`❌ Security Error: ${e.message}`);
-      process.exit(1);
-    }
+// 3. Validate Callback URL: Tránh rò rỉ callback secret
+if (CALLBACK_URL) {
+  try {
+    validateCallbackUrl(CALLBACK_URL);
+  } catch (e: any) {
+    console.error(`❌ Security Error: ${e.message}`);
+    process.exit(1);
   }
+}
 
-  // 4. Validate Source URL: Tránh SSRF
+
   try {
     const sUrl = new URL(SOURCE_URL);
     if (
@@ -387,7 +216,6 @@ export async function runTranscode() {
     process.exit(1);
   }
 
-  // Giải mã Key R2 nếu chúng được mã hóa
   const ACCESS_KEY_ID = decrypt(TARGET_R2_CONFIG.access_key_id, PRIVATE_KEY);
   const SECRET_ACCESS_KEY = decrypt(
     TARGET_R2_CONFIG.secret_access_key,
@@ -401,7 +229,6 @@ export async function runTranscode() {
     process.exit(1);
   }
 
-  // Check if it looks like it's still encrypted (too long for a standard access key)
   if (ACCESS_KEY_ID.length > 100) {
     console.error(
       "❌ Error: ACCESS_KEY_ID seems to be still encrypted or invalid. Check TRANSCODER_PRIVATE_KEY.",
@@ -413,7 +240,7 @@ export async function runTranscode() {
     VARIANTS_CSV.split(",").includes(v.name),
   );
 
-  console.log(`🎬 Job started for: ${SOURCE_URL}`);
+  console.log(`🎬 HLS Job started for: ${SOURCE_URL}`);
   await sendCallback(
     CALLBACK_URL,
     {
@@ -425,14 +252,11 @@ export async function runTranscode() {
     CALLBACK_CLIENT_ID,
   );
 
-  const client = new S3Client({
-    region: "auto",
-    endpoint: TARGET_R2_CONFIG.endpoint,
-    credentials: {
-      accessKeyId: ACCESS_KEY_ID,
-      secretAccessKey: SECRET_ACCESS_KEY,
-    },
-  });
+  const client = createR2Client(
+    TARGET_R2_CONFIG.endpoint, 
+    ACCESS_KEY_ID, 
+    SECRET_ACCESS_KEY
+  );
 
   const workingDir = await fs.mkdtemp(path.join(os.tmpdir(), `hls-job-`));
   const localSource = path.join(workingDir, "source.mp4");
@@ -496,7 +320,6 @@ export async function runTranscode() {
     }
     console.log(`✅ Success: ${masterUrl}`);
 
-    // Derive hlsVersion from prefix (e.g. hls/v3-abc -> v3)
     const hlsVersionMatch = TARGET_R2_CONFIG.prefix.match(/hls\/(v\d+)/);
     const hlsVersion = hlsVersionMatch ? hlsVersionMatch[1] : "v2";
 
@@ -538,13 +361,10 @@ export async function runTranscode() {
     }
   } finally {
     await fs.rm(workingDir, { recursive: true, force: true });
-    // Xóa file payload để đảm bảo an toàn
     await fs.unlink(payloadPath).catch(() => {});
   }
 }
 
-
-// Only run if this file is the main entry point
 if (import.meta.url === `file://${process.argv[1]}`) {
-  runTranscode();
+  runHlsTranscode();
 }

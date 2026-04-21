@@ -1,15 +1,11 @@
-name: HLS Transcoder Service
+name: Media Transcription Service
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   repository_dispatch:
-    types: [build-hls]
+    types: [build-transcription]
 
 jobs:
-  test:
+  transcribe:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,46 +20,32 @@ jobs:
           node-version: 24
           cache: "npm"
 
-      - name: Install dependencies
-        run: npm install
-
-      - name: Run Tests
-        run: npm test
-
-  transcode:
-    if: github.event_name == 'repository_dispatch'
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Mask Sensitive Payload
-        run: |
-          echo "::add-mask::${{ toJson(github.event.client_payload) }}"
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          node-version: 24
-          cache: "npm"
+          python-version: "3.10"
 
-      - name: Install dependencies
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python Dependencies
+        run: |
+          pip install faster-whisper
+
+      - name: Install Node Dependencies
         run: npm install
 
-      - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
-
-      - name: Run Transcoder
+      - name: Run Transcriber
         env:
           TRANSCODER_PRIVATE_KEY: ${{ secrets.TRANSCODER_PRIVATE_KEY }}
           HLS_CALLBACK_SECRET: ${{ secrets.HLS_CALLBACK_SECRET }}
           ALLOWED_CALLBACK_DOMAINS: ${{ secrets.ALLOWED_CALLBACK_DOMAINS }}
+          # Hỗ trợ multi-client secret nếu cần
           HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX: ${{ secrets.HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX }}
           HLS_CALLBACK_SECRET_STAGAPPS_PROD: ${{ secrets.HLS_CALLBACK_SECRET_STAGAPPS_PROD }}
           CLIENT_PAYLOAD: ${{ toJson(github.event.client_payload) }}
         run: |
-          # Ghi payload ra file thông qua biến môi trường để tránh lộ log
           node -e "require('fs').writeFileSync('payload.json', process.env.CLIENT_PAYLOAD)"
-
-          # Chạy transcoder với file payload
-          npx tsx src/hls/index.ts payload.json
+          npx tsx src/transcribe/index.ts payload.json

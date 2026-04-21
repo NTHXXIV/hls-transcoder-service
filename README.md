@@ -48,7 +48,7 @@ Gửi một POST request tới GitHub API:
 curl -X POST \
   -H "Accept: application/vnd.github.v3+json" \
   -H "Authorization: token YOUR_GITHUB_PAT" \
-  https://api.github.com/repos/YOUR_USERNAME/hls-transcoder-service/dispatches \
+  https://api.github.com/repos/YOUR_USERNAME/media-processor-service/dispatches \
   -d '{
     "event_type": "build-hls",
     "client_payload": {
