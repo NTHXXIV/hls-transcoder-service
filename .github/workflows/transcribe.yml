@@ -48,6 +48,7 @@ jobs:
 
       - name: Run Transcriber
         env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TRANSCODER_PRIVATE_KEY: ${{ secrets.TRANSCODER_PRIVATE_KEY }}
           HLS_CALLBACK_SECRET: ${{ secrets.HLS_CALLBACK_SECRET }}
           ALLOWED_CALLBACK_DOMAINS: ${{ secrets.ALLOWED_CALLBACK_DOMAINS }}

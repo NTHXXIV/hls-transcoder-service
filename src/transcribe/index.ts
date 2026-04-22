@@ -15,6 +15,7 @@ import { decrypt } from "../shared/crypto.js";
 import { sendCallback, validateCallbackUrl } from "../shared/callback.js";
 import { createR2Client } from "../shared/r2.js";
 import { extractAudio, getContentType, getVideoDuration } from "../shared/utils.js";
+import { cleanTranscript } from "./cleaner.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -143,7 +144,11 @@ export async function runTranscriptionJob() {
       });
     });
 
-    // 4. Structure result
+    // 4. Structure & Clean result
+    console.log(`✨ Cleaning transcript with Gemini...`);
+    const rawSegments = (whisperResult as any).segments;
+    const { cleanedFullText, cleanedSegments, summary, keywords } = await cleanTranscript(rawSegments);
+
     const finalResult = {
       jobId: JOB_ID,
       lessonId: LESSON_ID,
@@ -152,10 +157,15 @@ export async function runTranscriptionJob() {
         language: (whisperResult as any).language,
         durationSeconds: durationSeconds || (whisperResult as any).duration,
         model: MODEL_SIZE,
-        generatedAt: new Date().toISOString()
+        generatedAt: new Date().toISOString(),
+        isCleaned: !!process.env.GEMINI_API_KEY,
+        summary,
+        keywords
       },
-      fullText: (whisperResult as any).full_text,
-      segments: (whisperResult as any).segments
+      fullText: cleanedFullText,
+      rawFullText: (whisperResult as any).full_text,
+      segments: cleanedSegments,
+      rawSegments: rawSegments
     };
 
     await fs.writeFile(resultJsonPath, JSON.stringify(finalResult, null, 2));
@@ -183,7 +193,8 @@ export async function runTranscriptionJob() {
       sourceVersion: SOURCE_VERSION,
       status: "transcription_ready",
       transcriptUrl,
-      fullText: finalResult.fullText, // Trả về text để BE lưu DB ngay
+      fullText: finalResult.fullText, 
+      segments: finalResult.segments, // Bản sạch cho Subtitle
       metadata: finalResult.metadata
     }, CALLBACK_CLIENT_ID);
 
