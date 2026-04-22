@@ -94,7 +94,7 @@ export async function runTranscriptionJob() {
     lessonId: LESSON_ID,
     jobId: JOB_ID,
     sourceVersion: SOURCE_VERSION,
-    status: "processing_transcription",
+    status: "processing",
   }, CALLBACK_CLIENT_ID);
 
   const workingDir = await fs.mkdtemp(path.join(os.tmpdir(), `transcribe-job-`));
@@ -117,8 +117,10 @@ export async function runTranscriptionJob() {
 
     // 3. Run Whisper
     console.log(`🤖 Running Whisper (${MODEL_SIZE})...`);
-    const defaultFinancialContext = "Đây là video về chủ đề tài chính, chứng khoán, ngân hàng, đầu tư tại Việt Nam. Các thuật ngữ bao gồm: cổ phiếu, trái phiếu, lãi suất, VN-Index, báo cáo tài chính, danh mục đầu tư.";
-    const initialPrompt = TITLE ? `Video có tiêu đề: "${TITLE}". Nội dung: ${defaultFinancialContext}` : defaultFinancialContext;
+    
+    // Default prompt focusing on common Vietnamese filler words and basic English tech terms
+    const genericFallbackPrompt = "Chào mọi người, trong video này chúng ta sẽ nói về... OK, yeah, video, micro, slide, trình bày, nội dung, ví dụ như là, các bạn nhé.";
+    const initialPrompt = payload.initial_prompt || genericFallbackPrompt;
     
     const whisperScript = path.join(__dirname, "whisper_runner.py");
     
@@ -191,7 +193,7 @@ export async function runTranscriptionJob() {
       lessonId: LESSON_ID,
       jobId: JOB_ID,
       sourceVersion: SOURCE_VERSION,
-      status: "transcription_failed",
+      status: "failed",
       error: String(error?.message || error),
     }, CALLBACK_CLIENT_ID);
     process.exit(1);
