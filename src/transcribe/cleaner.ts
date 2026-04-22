@@ -27,33 +27,38 @@ export async function cleanTranscript(segments: TranscriptSegment[]): Promise<{
 
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
+    // Use the latest flash model as verified by user's curl test
     const model = genAI.getGenerativeModel({ 
-      model: "gemini-1.5-flash",
-      generationConfig: { responseMimeType: "application/json" } 
+      model: "gemini-flash-latest" 
     });
 
     const prompt = `
 Bạn là một trợ lý AI chuyên nghiệp xử lý nội dung video.
 NHIỆM VỤ:
-1. LÀM SẠCH VĂN BẢN: Sửa lỗi chính tả, loại bỏ từ đệm, sửa câu lủng củng trong danh sách "segments".
+1. LÀM SẠCH VĂN BẢN: Sửa lỗi chính tả, loại bỏ từ đệm, sửa câu lủng củng trong danh sách "segments" được cung cấp bên dưới.
 2. TÓM TẮT: Viết một đoạn tóm tắt nội dung chính (khoảng 2-3 câu).
 3. TỪ KHÓA: Trích xuất 5-7 từ khóa quan trọng nhất.
 
+YÊU CẦU ĐẦU RA: Trả về một JSON duy nhất, không kèm văn bản giải thích.
+Cấu trúc JSON:
+{
+  "cleanedSegments": [{ "start": number, "end": number, "text": string }],
+  "cleanedFullText": string,
+  "summary": string,
+  "keywords": [string]
+}
+
 INPUT JSON:
 ${JSON.stringify(segments)}
-
-YÊU CẦU ĐẦU RA (JSON duy nhất):
-{
-  "cleanedSegments": [{ "start":..., "end":..., "text":... }],
-  "cleanedFullText": "...",
-  "summary": "Đoạn tóm tắt nội dung...",
-  "keywords": ["từ khóa 1", "từ khóa 2", ...]
-}
 `;
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
-    const output = JSON.parse(response.text());
+    const text = response.text();
+    
+    // Parse JSON from response (handling potential markdown blocks)
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const output = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(text);
 
     return {
       cleanedFullText: output.cleanedFullText || rawFullText,
