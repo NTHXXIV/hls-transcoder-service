@@ -19,13 +19,6 @@ import { cleanTranscript } from "./cleaner.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export function validatePayload(payload: any) {
-  const { lesson_id, source_url, target_r2_config } = payload;
-  if (!lesson_id || !source_url || !target_r2_config) {
-    throw new Error("Missing mandatory fields (lesson_id, source_url, target_r2_config)");
-  }
-}
-
 async function uploadToR2(payload: any, resultPath: string) {
   const PRIVATE_KEY = process.env.TRANSCODER_PRIVATE_KEY;
   const { target_r2_config } = payload;
@@ -46,129 +39,95 @@ async function uploadToR2(payload: any, resultPath: string) {
 
 export async function runTranscriptionJob() {
   const payloadPath = process.argv[2];
-  const stage = process.argv[3];
+  const mode = process.argv[3]; // --whisper or --clean
 
   if (!payloadPath) process.exit(1);
   const payload = JSON.parse(readFileSync(payloadPath, "utf-8"));
-  
-  // Use job_id if available, otherwise fallback to lesson_id (which is mandatory)
   const jobId = payload.job_id || payload.lesson_id;
-  const workingDir = path.join(os.tmpdir(), `transcribe-job-${jobId}`);
-  
-  const intermediatePath = path.join(workingDir, "intermediate.json");
-  const resultJsonPath = path.join(workingDir, "transcript.json");
+  const workingDir = path.join(os.tmpdir(), `transcribe-${jobId}-${Date.now()}`);
 
   try {
-    validatePayload(payload);
+    await fs.mkdir(workingDir, { recursive: true });
 
-    if (!stage || stage === "--stage=whisper") {
-      console.log(`🎙️ Phase 1: Whisper started for job ${jobId}`);
-      await fs.mkdir(workingDir, { recursive: true });
+    // --- MODE: WHISPER (ONLY) ---
+    if (mode === "--whisper") {
+      console.log(`🎙️ Running Whisper for job ${jobId}`);
       
-      try {
-        await sendCallback(payload.callback_url, {
-          lessonId: payload.lesson_id, jobId: payload.job_id, status: "processing",
-        }, payload.callback_client_id);
-      } catch (e) {
-        console.error("⚠️ Initial callback failed, but continuing...");
-      }
-
-      const localVideo = path.join(workingDir, "source_video");
+      const localVideo = path.join(workingDir, "video");
       const localAudio = path.join(workingDir, "audio.wav");
-      
+      const resultPath = path.join(workingDir, "raw.json");
+
+      // Initial callback
+      await sendCallback(payload.callback_url, { lessonId: payload.lesson_id, jobId: payload.job_id, status: "processing" }, payload.callback_client_id);
+
+      // Processing
       const response = await fetch(payload.source_url);
       await pipeline(Readable.fromWeb(response.body! as any), createWriteStream(localVideo));
       const durationSeconds = await getVideoDuration(localVideo);
       await extractAudio(localVideo, localAudio);
 
-      const whisperScript = path.join(__dirname, "whisper_runner.py");
       const whisperResult: any = await new Promise((resolve, reject) => {
-        const pythonProcess = spawn("python3", [whisperScript, localAudio, payload.model_size || "medium", payload.initial_prompt || ""]);
+        const pythonProcess = spawn("python3", [path.join(__dirname, "whisper_runner.py"), localAudio, payload.model_size || "medium", payload.initial_prompt || ""]);
         let stdout = "";
-        pythonProcess.stdout.on("data", (data) => stdout += data.toString());
-        pythonProcess.stderr.on("data", (data) => process.stderr.write(data));
-        pythonProcess.on("close", (code) => {
-          if (code !== 0) return reject(new Error("Whisper failed"));
-          try { resolve(JSON.parse(stdout)); } catch (e) { reject(e); }
-        });
+        pythonProcess.stdout.on("data", (d) => stdout += d);
+        pythonProcess.stderr.on("data", (d) => process.stderr.write(d));
+        pythonProcess.on("close", (c) => c === 0 ? resolve(JSON.parse(stdout)) : reject(new Error("Whisper failed")));
       });
 
-      const initialResult = {
+      const finalResult = {
         jobId: payload.job_id, lessonId: payload.lesson_id,
         metadata: { title: payload.title, durationSeconds, model: payload.model_size, isCleaned: false },
         fullText: whisperResult.full_text,
         segments: whisperResult.segments
       };
-      await fs.writeFile(resultJsonPath, JSON.stringify(initialResult, null, 2));
-      await fs.writeFile(intermediatePath, JSON.stringify({ whisperResult, durationSeconds }));
+      await fs.writeFile(resultPath, JSON.stringify(finalResult, null, 2));
 
-      const transcriptUrl = await uploadToR2(payload, resultJsonPath);
+      const transcriptUrl = await uploadToR2(payload, resultPath);
       await sendCallback(payload.callback_url, {
         lessonId: payload.lesson_id, jobId: payload.job_id, status: "transcription_ready",
-        transcriptUrl, fullText: initialResult.fullText, segments: initialResult.segments, metadata: initialResult.metadata
+        transcriptUrl, fullText: finalResult.fullText, segments: finalResult.segments, metadata: finalResult.metadata
       }, payload.callback_client_id);
       
-      console.log(`✅ Phase 1: Raw Transcription ready.`);
+      console.log(`✅ Whisper Done: ${transcriptUrl}`);
     }
-// --- PHASE 2: GEMINI & CALLBACK ---
-if (!stage || stage === "--stage=gemini") {
-  console.log(`✨ Phase 2: AI Cleaning for job ${jobId}...`);
 
-  await fs.mkdir(workingDir, { recursive: true });
+    // --- MODE: CLEAN (ONLY) ---
+    if (mode === "--clean") {
+      console.log(`✨ Running Gemini Clean for job ${jobId}`);
+      if (!payload.raw) throw new Error("Missing 'raw' data in payload");
 
-  let whisperResult: any;
-  let durationSeconds: number;
+      const { cleanedFullText, cleanedSegments, summary, keywords } = await cleanTranscript(payload.raw.segments);
+      const finalSegments = cleanedSegments.filter((s: any) => s.text && s.text.trim().length > 0);
+      const resultPath = path.join(workingDir, "cleaned.json");
 
-  if (payload.raw) {
-    whisperResult = { segments: payload.raw.segments || [], language: payload.raw.language || "vi", full_text: payload.raw.full_text || "" };
-    durationSeconds = payload.raw.duration_seconds || 0;
-  } else {
-    if (!readFileSync(intermediatePath)) throw new Error(`Intermediate file not found`);
-    const intermediate = JSON.parse(readFileSync(intermediatePath, "utf-8"));
-    whisperResult = intermediate.whisperResult;
-    durationSeconds = intermediate.durationSeconds;
-  }
+      const finalResult = {
+        jobId: payload.job_id, lessonId: payload.lesson_id,
+        metadata: { title: payload.title, durationSeconds: payload.raw.duration_seconds, isCleaned: true, summary, keywords },
+        fullText: cleanedFullText,
+        rawFullText: payload.raw.full_text,
+        segments: finalSegments,
+        rawSegments: payload.raw.segments
+      };
 
-  const { cleanedFullText, cleanedSegments, summary, keywords } = await cleanTranscript(whisperResult.segments);
+      await fs.writeFile(resultPath, JSON.stringify(finalResult, null, 2));
+      const transcriptUrl = await uploadToR2(payload, resultPath);
 
-  // Lọc bỏ các segment bị trống sau khi làm sạch để tránh lỗi validation của Backend
-  const finalSegments = cleanedSegments.filter(s => s.text && s.text.trim().length > 0);
+      await sendCallback(payload.callback_url, {
+        lessonId: payload.lesson_id, jobId: payload.job_id, status: "transcription_cleaned",
+        transcriptUrl, fullText: finalResult.fullText, segments: finalResult.segments, metadata: finalResult.metadata
+      }, payload.callback_client_id);
 
-  const finalResult = {
-    jobId: payload.job_id, lessonId: payload.lesson_id,
-    metadata: { title: payload.title, durationSeconds, isCleaned: true, summary, keywords },
-    fullText: cleanedFullText,
-    rawFullText: whisperResult.full_text,
-    segments: finalSegments,
-    rawSegments: whisperResult.segments
-  };
-
-  await fs.writeFile(resultJsonPath, JSON.stringify(finalResult, null, 2));
-  const transcriptUrl = await uploadToR2(payload, resultJsonPath);
-
-  // Sử dụng status 'transcription_ready' để khớp với schema hiện tại của Backend
-  await sendCallback(payload.callback_url, {
-    lessonId: payload.lesson_id, jobId: payload.job_id, status: "transcription_ready",
-    transcriptUrl, fullText: finalResult.fullText, segments: finalResult.segments, metadata: finalResult.metadata
-  }, payload.callback_client_id);
-
-
-      console.log(`✅ Phase 2: Cleaned Transcription updated.`);
+      console.log(`✅ Clean Done: ${transcriptUrl}`);
     }
 
   } catch (error: any) {
-    console.error(`❌ Job Failed: ${error?.message}`);
-    if (!stage || stage === "--stage=whisper") {
-      await sendCallback(payload.callback_url, {
-        lessonId: payload.lesson_id, jobId: payload.job_id, status: "failed", error: error?.message,
-      }, payload.callback_client_id);
+    console.error(`❌ Error: ${error.message}`);
+    if (mode === "--whisper") {
+      await sendCallback(payload.callback_url, { lessonId: payload.lesson_id, jobId: payload.job_id, status: "failed", error: error.message }, payload.callback_client_id);
     }
     process.exit(1);
   } finally {
-    if (stage === "--stage=gemini") {
-      await fs.rm(workingDir, { recursive: true, force: true }).catch(() => {});
-      try { await fs.unlink(payloadPath); } catch (e) {}
-    }
+    await fs.rm(workingDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
