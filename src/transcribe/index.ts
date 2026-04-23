@@ -64,9 +64,15 @@ export async function runTranscriptionJob() {
       console.log(`🎙️ Phase 1: Whisper started...`);
       await fs.mkdir(workingDir, { recursive: true });
       
-      await sendCallback(payload.callback_url, {
-        lessonId: payload.lesson_id, jobId: JOB_ID, status: "processing",
-      }, payload.callback_client_id);
+      // Nếu callback đầu tiên thất bại, dừng ngay để tránh phí tài nguyên
+      try {
+        await sendCallback(payload.callback_url, {
+          lessonId: payload.lesson_id, jobId: JOB_ID, status: "processing",
+        }, payload.callback_client_id);
+      } catch (cbError: any) {
+        console.error(`❌ Critical: Initial callback failed. Stopping job. Error: ${cbError.message}`);
+        process.exit(1);
+      }
 
       const localVideo = path.join(workingDir, "source_video");
       const localAudio = path.join(workingDir, "audio.wav");

@@ -48,6 +48,8 @@ jobs:
           TRANSCODER_PRIVATE_KEY: ${{ secrets.TRANSCODER_PRIVATE_KEY }}
           HLS_CALLBACK_SECRET: ${{ secrets.HLS_CALLBACK_SECRET }}
           ALLOWED_CALLBACK_DOMAINS: ${{ secrets.ALLOWED_CALLBACK_DOMAINS }}
+          HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX: ${{ secrets.HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX }}
+          HLS_CALLBACK_SECRET_STAGAPPS_PROD: ${{ secrets.HLS_CALLBACK_SECRET_STAGAPPS_PROD }}
           PAYLOAD_JSON: ${{ toJson(github.event.client_payload) }}
         run: |
           node -e "require('fs').writeFileSync('payload.json', process.env.PAYLOAD_JSON)"
@@ -106,6 +108,8 @@ jobs:
           TRANSCODER_PRIVATE_KEY: ${{ secrets.TRANSCODER_PRIVATE_KEY }}
           HLS_CALLBACK_SECRET: ${{ secrets.HLS_CALLBACK_SECRET }}
           ALLOWED_CALLBACK_DOMAINS: ${{ secrets.ALLOWED_CALLBACK_DOMAINS }}
+          HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX: ${{ secrets.HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX }}
+          HLS_CALLBACK_SECRET_STAGAPPS_PROD: ${{ secrets.HLS_CALLBACK_SECRET_STAGAPPS_PROD }}
           PAYLOAD_JSON: ${{ toJson(github.event.client_payload) }}
         run: |
           # Create payload.json only if not restored from artifact
