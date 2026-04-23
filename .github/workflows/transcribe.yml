@@ -6,11 +6,12 @@ on:
 
 jobs:
   transcribe:
+    name: Whisper Transcription
+    if: github.event.client_payload.stage != 'gemini'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Ghi payload trực tiếp vào file mà không thông qua biến môi trường ENV công khai
       - name: Create Payload File
         run: |
           cat << 'EOF' > payload.json
@@ -48,13 +49,79 @@ jobs:
       - name: Install Node Dependencies
         run: npm ci || npm install
 
-      - name: Run Transcriber
+      - name: Run Phase 1 (Whisper)
+        env:
+          TRANSCODER_PRIVATE_KEY: ${{ secrets.TRANSCODER_PRIVATE_KEY }}
+          HLS_CALLBACK_SECRET: ${{ secrets.HLS_CALLBACK_SECRET }}
+          ALLOWED_CALLBACK_DOMAINS: ${{ secrets.ALLOWED_CALLBACK_DOMAINS }}
+        run: |
+          npx tsx src/transcribe/index.ts payload.json --stage=whisper
+
+      - name: Upload Intermediate Data
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcribe-data-${{ github.event.client_payload.job_id }}
+          path: |
+            /tmp/transcribe-job-${{ github.event.client_payload.job_id }}/
+            payload.json
+          retention-days: 1
+
+  post_process:
+    name: Gemini Cleaning & Callback
+    needs: transcribe
+    if: |
+      always() && 
+      (needs.transcribe.result == 'success' || needs.transcribe.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Payload File
+        run: |
+          if [ ! -f payload.json ]; then
+            cat << 'EOF' > payload.json
+            ${{ toJson(github.event.client_payload) }}
+            EOF
+          fi
+
+      - name: Download Intermediate Data
+        if: needs.transcribe.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: transcribe-data-${{ github.event.client_payload.job_id }}
+          path: . 
+
+      - name: Restore Working Dir
+        if: needs.transcribe.result == 'success'
+        run: |
+          # The artifact contains files directly if uploaded with specific path
+          # We need to recreate the exact structure in /tmp
+          JOB_ID="${{ github.event.client_payload.job_id }}"
+          TARGET_DIR="/tmp/transcribe-job-$JOB_ID"
+          sudo mkdir -p "$TARGET_DIR"
+          
+          # Nếu files nằm trong folder 'tmp' sau khi download
+          if [ -d "./tmp" ]; then
+             sudo cp -r ./tmp/transcribe-job-$JOB_ID/* "$TARGET_DIR/"
+          else
+             # Nếu files nằm trực tiếp ở root của artifact
+             sudo cp intermediate.json "$TARGET_DIR/" || true
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: "npm"
+
+      - name: Install Node Dependencies
+        run: npm ci || npm install
+
+      - name: Run Phase 2 (Gemini)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TRANSCODER_PRIVATE_KEY: ${{ secrets.TRANSCODER_PRIVATE_KEY }}
           HLS_CALLBACK_SECRET: ${{ secrets.HLS_CALLBACK_SECRET }}
           ALLOWED_CALLBACK_DOMAINS: ${{ secrets.ALLOWED_CALLBACK_DOMAINS }}
-          HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX: ${{ secrets.HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX }}
-          HLS_CALLBACK_SECRET_STAGAPPS_PROD: ${{ secrets.HLS_CALLBACK_SECRET_STAGAPPS_PROD }}
         run: |
-          npx tsx src/transcribe/index.ts payload.json
+          npx tsx src/transcribe/index.ts payload.json --stage=gemini
