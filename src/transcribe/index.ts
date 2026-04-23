@@ -114,50 +114,44 @@ export async function runTranscriptionJob() {
 if (!stage || stage === "--stage=gemini") {
   console.log(`✨ Phase 2: AI Cleaning for job ${jobId}...`);
 
-  // Đảm bảo thư mục làm việc tồn tại (đặc biệt quan quan trọng cho Clean-only)
   await fs.mkdir(workingDir, { recursive: true });
 
   let whisperResult: any;
-
   let durationSeconds: number;
 
-  // Ưu tiên lấy dữ liệu thô từ payload.raw (đã gộp để tránh giới hạn 10 properties của GitHub)
   if (payload.raw) {
-    console.log("📦 Using raw data from payload object...");
-    whisperResult = {
-      segments: payload.raw.segments || [],
-      language: payload.raw.language || "vi",
-      full_text: payload.raw.full_text || ""
-    };
+    whisperResult = { segments: payload.raw.segments || [], language: payload.raw.language || "vi", full_text: payload.raw.full_text || "" };
     durationSeconds = payload.raw.duration_seconds || 0;
   } else {
-    // Fallback: Đọc từ file trung gian (luồng tự động trong GitHub)
-    console.log("📂 Reading from intermediate file...");
-    if (!readFileSync(intermediatePath)) throw new Error(`Intermediate file not found at ${intermediatePath}`);
+    if (!readFileSync(intermediatePath)) throw new Error(`Intermediate file not found`);
     const intermediate = JSON.parse(readFileSync(intermediatePath, "utf-8"));
     whisperResult = intermediate.whisperResult;
     durationSeconds = intermediate.durationSeconds;
   }
 
+  const { cleanedFullText, cleanedSegments, summary, keywords } = await cleanTranscript(whisperResult.segments);
 
-      const { cleanedFullText, cleanedSegments, summary, keywords } = await cleanTranscript(whisperResult.segments);
+  // Lọc bỏ các segment bị trống sau khi làm sạch để tránh lỗi validation của Backend
+  const finalSegments = cleanedSegments.filter(s => s.text && s.text.trim().length > 0);
 
-      const finalResult = {
-        jobId: payload.job_id, lessonId: payload.lesson_id,
-        metadata: { title: payload.title, durationSeconds, isCleaned: true, summary, keywords },
-        fullText: cleanedFullText,
-        rawFullText: whisperResult.full_text,
-        segments: cleanedSegments,
-        rawSegments: whisperResult.segments
-      };
+  const finalResult = {
+    jobId: payload.job_id, lessonId: payload.lesson_id,
+    metadata: { title: payload.title, durationSeconds, isCleaned: true, summary, keywords },
+    fullText: cleanedFullText,
+    rawFullText: whisperResult.full_text,
+    segments: finalSegments,
+    rawSegments: whisperResult.segments
+  };
 
-      await fs.writeFile(resultJsonPath, JSON.stringify(finalResult, null, 2));
-      const transcriptUrl = await uploadToR2(payload, resultJsonPath);
+  await fs.writeFile(resultJsonPath, JSON.stringify(finalResult, null, 2));
+  const transcriptUrl = await uploadToR2(payload, resultJsonPath);
 
-      await sendCallback(payload.callback_url, {
-        lessonId: payload.lesson_id, jobId: payload.job_id, status: "transcription_cleaned",
-        transcriptUrl, fullText: finalResult.fullText, segments: finalResult.segments, metadata: finalResult.metadata
-      }, payload.callback_client_id);
+  // Sử dụng status 'transcription_ready' để khớp với schema hiện tại của Backend
+  await sendCallback(payload.callback_url, {
+    lessonId: payload.lesson_id, jobId: payload.job_id, status: "transcription_ready",
+    transcriptUrl, fullText: finalResult.fullText, segments: finalResult.segments, metadata: finalResult.metadata
+  }, payload.callback_client_id);
+
 
       console.log(`✅ Phase 2: Cleaned Transcription updated.`);
     }
