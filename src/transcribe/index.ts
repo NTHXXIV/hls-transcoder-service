@@ -114,7 +114,11 @@ export async function runTranscriptionJob() {
 if (!stage || stage === "--stage=gemini") {
   console.log(`✨ Phase 2: AI Cleaning for job ${jobId}...`);
 
+  // Đảm bảo thư mục làm việc tồn tại (đặc biệt quan quan trọng cho Clean-only)
+  await fs.mkdir(workingDir, { recursive: true });
+
   let whisperResult: any;
+
   let durationSeconds: number;
 
   // Ưu tiên lấy dữ liệu thô từ payload.raw (đã gộp để tránh giới hạn 10 properties của GitHub)
