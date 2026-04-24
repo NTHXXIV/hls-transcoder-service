@@ -12,11 +12,16 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const PROMPT_TEMPLATE = (segmentsJson: string) => `
 Bạn là một trợ lý AI chuyên nghiệp xử lý nội dung video.
 NHIỆM VỤ:
-1. LÀM SẠCH VĂN BẢN: Sửa lỗi chính tả, loại bỏ từ đệm, sửa câu lủng củng trong danh sách "segments" bên dưới.
-2. TÓM TẮT: Viết một đoạn tóm tắt nội dung của ĐOẠN NÀY (khoảng 1-2 câu).
-3. TỪ KHÓA: Trích xuất 3-5 từ khóa quan trọng của ĐOẠN NÀY.
+1. LÀM SẠCH VĂN BẢN: Sửa lỗi chính tả, loại bỏ từ đệm (à, ờ, thì, mà...), sửa câu lủng củng.
+2. GIỮ NGUYÊN THỜI GIAN: Tuyệt đối không thay đổi giá trị "start" và "end" của các segment.
+3. TÓM TẮT: Viết một đoạn tóm tắt nội dung của ĐOẠN NÀY (khoảng 1-2 câu).
+4. TỪ KHÓA: Trích xuất 3-5 từ khóa quan trọng của ĐOẠN NÀY.
 
-YÊU CẦU ĐẦU RA: Trả về duy nhất 1 JSON, không kèm giải thích.
+YÊU CẦU ĐẦU RA:
+- Trả về duy nhất 1 JSON block.
+- Không thêm bất kỳ văn bản giải thích nào ngoài JSON.
+- Đảm bảo "cleanedSegments" có cùng số lượng phần tử với input.
+
 Cấu trúc JSON:
 {
   "cleanedSegments": [{ "start": number, "end": number, "text": string }],
@@ -30,8 +35,24 @@ ${segmentsJson}
 `;
 
 // Danh sách các model để rotate khi gặp lỗi
-const GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "mixtral-8x7b-32768"];
-const GEMINI_MODELS = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro"];
+const GROQ_MODELS = [
+  "llama-3.1-8b-instant",
+  "llama-3.3-70b-versatile",
+  "deepseek-r1-distill-llama-70b",
+  "llama-3.1-70b-versatile",
+  "gemma2-9b-it"
+];
+
+const GEMINI_MODELS = [
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+  "gemini-1.5-flash-8b",
+  "gemini-1.5-pro",
+];
+
+// State để nhớ model nào đang chạy tốt
+let lastSuccessfulGroqModelIndex = 0;
+let lastSuccessfulGeminiModelIndex = 0;
 
 async function cleanWithGemini(segments: TranscriptSegment[]): Promise<any> {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -40,19 +61,44 @@ async function cleanWithGemini(segments: TranscriptSegment[]): Promise<any> {
   const genAI = new GoogleGenerativeAI(apiKey);
   let lastError: any = null;
 
-  for (const modelName of GEMINI_MODELS) {
+  // Thử từ model thành công lần trước
+  for (let i = 0; i < GEMINI_MODELS.length; i++) {
+    const idx = (lastSuccessfulGeminiModelIndex + i) % GEMINI_MODELS.length;
+    const modelName = GEMINI_MODELS[idx];
+    
     try {
       console.log(`    💎 Trying Gemini model: ${modelName}...`);
       const model = genAI.getGenerativeModel({ model: modelName });
-      const result = await model.generateContent(PROMPT_TEMPLATE(JSON.stringify(segments)));
+      
+      const result = await model.generateContent({
+        contents: [{ role: "user", parts: [{ text: PROMPT_TEMPLATE(JSON.stringify(segments)) }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          temperature: 0.1,
+        }
+      });
+
       const text = result.response.text();
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error("Invalid AI Response: No JSON found");
-      return JSON.parse(jsonMatch[0]);
+      try {
+        const parsed = JSON.parse(text);
+        lastSuccessfulGeminiModelIndex = idx; // Lưu lại model thành công
+        return parsed;
+      } catch (e) {
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          lastSuccessfulGeminiModelIndex = idx;
+          return JSON.parse(jsonMatch[0]);
+        }
+        throw new Error("Invalid AI Response: Could not parse JSON");
+      }
     } catch (error: any) {
       console.warn(`    ⚠️ Gemini model ${modelName} failed: ${error.message}`);
       lastError = error;
-      if (error.message?.includes("429")) await sleep(2000);
+      if (error.message?.includes("429")) {
+        await sleep(5000);
+      } else if (error.message?.includes("404")) {
+        continue;
+      }
     }
   }
   throw lastError;
@@ -65,21 +111,36 @@ async function cleanWithGroq(segments: TranscriptSegment[]): Promise<any> {
   const groq = new Groq({ apiKey });
   let lastError: any = null;
 
-  for (const modelName of GROQ_MODELS) {
-    try {
-      console.log(`    🚀 Trying Groq model: ${modelName}...`);
-      const completion = await groq.chat.completions.create({
-        messages: [{ role: "user", content: PROMPT_TEMPLATE(JSON.stringify(segments)) }],
-        model: modelName,
-        response_format: { type: "json_object" }
-      });
-      const content = completion.choices[0]?.message?.content;
-      if (!content) throw new Error("Empty response from Groq");
-      return JSON.parse(content);
-    } catch (error: any) {
-      console.warn(`    ⚠️ Groq model ${modelName} failed: ${error.message}`);
-      lastError = error;
-      if (error.status === 429 || error.message?.includes("429")) await sleep(2000);
+  for (let i = 0; i < GROQ_MODELS.length; i++) {
+    const idx = (lastSuccessfulGroqModelIndex + i) % GROQ_MODELS.length;
+    const modelName = GROQ_MODELS[idx];
+    
+    let retries = 1; 
+    while (retries >= 0) {
+      try {
+        console.log(`    🚀 Trying Groq model: ${modelName}...`);
+        const completion = await groq.chat.completions.create({
+          messages: [{ role: "user", content: PROMPT_TEMPLATE(JSON.stringify(segments)) }],
+          model: modelName,
+          response_format: { type: "json_object" }
+        });
+        const content = completion.choices[0]?.message?.content;
+        if (!content) throw new Error("Empty response from Groq");
+        const parsed = JSON.parse(content);
+        lastSuccessfulGroqModelIndex = idx; // Lưu lại model thành công
+        return parsed;
+      } catch (error: any) {
+        console.warn(`    ⚠️ Groq model ${modelName} failed: ${error.message}`);
+        lastError = error;
+        
+        if (error.status === 429 || error.message?.includes("429")) {
+          console.log(`    ⏳ Rate limit hit for ${modelName}, retrying in 5s... (${retries} left)`);
+          await sleep(5000);
+          retries--;
+          continue;
+        }
+        break; 
+      }
     }
   }
   throw lastError;
@@ -106,21 +167,30 @@ export async function cleanTranscript(segments: TranscriptSegment[]) {
     console.log(`⏳ Processing chunk ${i + 1}/${chunks.length}...`);
     
     let result: any = null;
+    let chunkRetries = 2;
 
-    // 1. Thử Groq với cơ chế rotate model
-    try {
-      result = await cleanWithGroq(chunk);
-    } catch (groqError: any) {
-      console.warn(`  ⚠️ All Groq models failed for chunk ${i+1}.`);
-      
-      // 2. Fallback sang Gemini với cơ chế rotate model
+    while (chunkRetries >= 0 && !result) {
       try {
-        console.log(`  🔄 Switching provider to Gemini for chunk ${i+1}...`);
-        result = await cleanWithGemini(chunk);
-      } catch (geminiError: any) {
+        // 1. Thử Groq với cơ chế rotate model
+        try {
+          result = await cleanWithGroq(chunk);
+        } catch (groqError: any) {
+          console.warn(`  ⚠️ All Groq models failed for chunk ${i+1}.`);
+          
+          // 2. Fallback sang Gemini với cơ chế rotate model
+          console.log(`  🔄 Switching provider to Gemini for chunk ${i+1}...`);
+          result = await cleanWithGemini(chunk);
+        }
+      } catch (error: any) {
         console.error(`  ❌ All AI providers failed for chunk ${i+1}.`);
-        // THROW ERROR: Không "cứu vãn" bằng bản thô nữa, báo lỗi để Job fail chính thức
-        throw new Error(`CLEAN_JOB_FAILED: AI services are unavailable or quota exceeded (Chunk ${i+1}/${chunks.length}).`);
+        if (chunkRetries > 0) {
+          console.log(`  ⏳ Global failure for chunk ${i+1}, retrying the whole chunk in 30s... (${chunkRetries} left)`);
+          await sleep(30000);
+          chunkRetries--;
+        } else {
+          // THROW ERROR: Không "cứu vãn" bằng bản thô nữa, báo lỗi để Job fail chính thức
+          throw new Error(`CLEAN_JOB_FAILED: AI services are unavailable or quota exceeded after multiple retries (Chunk ${i+1}/${chunks.length}). Last error: ${error.message}`);
+        }
       }
     }
 
