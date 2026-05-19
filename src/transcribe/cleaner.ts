@@ -10,12 +10,23 @@ export interface TranscriptSegment {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 const PROMPT_TEMPLATE = (segmentsJson: string) => `
-Bạn là một trợ lý AI chuyên nghiệp xử lý nội dung video.
+Bạn là một trợ lý AI chuyên nghiệp xử lý nội dung video tài chính Việt Nam.
 NHIỆM VỤ:
 1. LÀM SẠCH VĂN BẢN: Sửa lỗi chính tả, loại bỏ từ đệm (à, ờ, thì, mà...), sửa câu lủng củng.
-2. GIỮ NGUYÊN THỜI GIAN: Tuyệt đối không thay đổi giá trị "start" và "end" của các segment.
-3. TÓM TẮT: Viết một đoạn tóm tắt nội dung của ĐOẠN NÀY (khoảng 1-2 câu).
-4. TỪ KHÓA: Trích xuất 3-5 từ khóa quan trọng của ĐOẠN NÀY.
+2. SỬA LỖI NHẬN DẠNG GIỌNG NÓI: Transcript được tạo bằng AI speech-to-text nên có thể nhầm tên cổ phiếu, công ty, thuật ngữ tài chính. Dùng ngữ cảnh xung quanh để suy luận và sửa.
+
+   LỖI PHỔ BIẾN ĐÃ BIẾT (ưu tiên sửa trước):
+   - "Stats", "SAC", "Stacks", "Stack", "Sac", "Sắc" → "Stag" (nền tảng giáo dục tài chính, tên đúng là Stag)
+   - "BIC" khi nói về tập đoàn bất động sản lớn → "VIC" (Vingroup)
+   - "Viết" khi nói về mã cổ phiếu → suy từ ngữ cảnh (VHM, VNM, VIC...)
+   - "khoa học" khi nói về đường link → "khóa học" (stag.vn/khoa-hoc)
+   - "mềm vẫn" → "bền vững"
+   - "kết luật" → "kết luận"
+
+   Danh sách ticker phổ biến để tham chiếu: VIC, VHM, VNM, HPG, MSN, TCB, VCB, BID, CTG, MBB, ACB, STB, SSI, FPT, REE, PNJ, MWG, DGC, GAS, SAB, VND, VPB, HDB, LPB, SHB, EIB, VIB, OCB, TPB, BVH, VJC, HVN, GMD, PVD, BSR, OIL, GVR, VRE, BCM, QNS, KDC, NLG, DXG, PDR, NVL, CII, DIG, HDG, KBC, SZC, IDC, PHR, CSV, DPM, DCM.
+3. GIỮ NGUYÊN THỜI GIAN: Tuyệt đối không thay đổi giá trị "start" và "end" của các segment.
+4. TÓM TẮT: Viết một đoạn tóm tắt nội dung của ĐOẠN NÀY (khoảng 1-2 câu).
+5. TỪ KHÓA: Trích xuất 3-5 từ khóa quan trọng của ĐOẠN NÀY.
 
 YÊU CẦU ĐẦU RA:
 - Trả về duy nhất 1 JSON block.
@@ -34,13 +45,9 @@ INPUT JSON:
 ${segmentsJson}
 `;
 
-// Danh sách các model để rotate khi gặp lỗi
+// Chỉ dùng model chất lượng cao — thà fail còn hơn ra transcript tệ
 const GROQ_MODELS = [
-  "llama-3.1-8b-instant",
   "llama-3.3-70b-versatile",
-  "deepseek-r1-distill-llama-70b",
-  "llama-3.1-70b-versatile",
-  "gemma2-9b-it"
 ];
 
 const GEMINI_MODELS = [
@@ -53,22 +60,31 @@ const GEMINI_MODELS = [
 let lastSuccessfulGroqModelIndex = 0;
 let lastSuccessfulGeminiModelIndex = 0;
 
-async function cleanWithGemini(segments: TranscriptSegment[]): Promise<any> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("No Gemini API Key");
+function getGeminiKeys(): string[] {
+  return [
+    process.env.GEMINI_API_KEY,
+    process.env.GEMINI_API_KEY_2,
+    process.env.GEMINI_API_KEY_3,
+  ].filter(Boolean) as string[];
+}
 
-  const genAI = new GoogleGenerativeAI(apiKey);
+async function cleanWithGemini(segments: TranscriptSegment[]): Promise<any> {
+  const keys = getGeminiKeys();
+  if (keys.length === 0) throw new Error("No Gemini API Key");
+
   let lastError: any = null;
 
-  // Thử từ model thành công lần trước
+  // Thử từ model thành công lần trước, mỗi model × mỗi key
   for (let i = 0; i < GEMINI_MODELS.length; i++) {
     const idx = (lastSuccessfulGeminiModelIndex + i) % GEMINI_MODELS.length;
     const modelName = GEMINI_MODELS[idx];
-    
+
+    for (const apiKey of keys) {
     try {
       console.log(`    💎 Trying Gemini model: ${modelName}...`);
+      const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({ model: modelName });
-      
+
       const result = await model.generateContent({
         contents: [{ role: "user", parts: [{ text: PROMPT_TEMPLATE(JSON.stringify(segments)) }] }],
         generationConfig: {
@@ -80,7 +96,7 @@ async function cleanWithGemini(segments: TranscriptSegment[]): Promise<any> {
       const text = result.response.text();
       try {
         const parsed = JSON.parse(text);
-        lastSuccessfulGeminiModelIndex = idx; // Lưu lại model thành công
+        lastSuccessfulGeminiModelIndex = idx;
         return parsed;
       } catch (e) {
         const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -91,31 +107,55 @@ async function cleanWithGemini(segments: TranscriptSegment[]): Promise<any> {
         throw new Error("Invalid AI Response: Could not parse JSON");
       }
     } catch (error: any) {
-      console.warn(`    ⚠️ Gemini model ${modelName} failed: ${error.message}`);
+      console.warn(`    ⚠️ Gemini model ${modelName} failed: ${error.message?.slice(0, 120)}`);
       lastError = error;
-      if (error.message?.includes("429")) {
-        await sleep(5000);
-      } else if (error.message?.includes("404")) {
-        continue;
-      }
     }
+    } // end key loop
   }
   throw lastError;
 }
 
-async function cleanWithGroq(segments: TranscriptSegment[]): Promise<any> {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) throw new Error("No Groq API Key");
+// Mutable key list — keys that hit 429 are moved to the back
+let groqKeys: string[] = [
+  process.env.GROQ_API_KEY,
+  process.env.GROQ_API_KEY_2,
+  process.env.GROQ_API_KEY_3,
+].filter(Boolean) as string[];
 
-  const groq = new Groq({ apiKey });
+// Session-level 429 cooldown per key (2 min TTL)
+const groqKeyCooldown = new Map<string, number>();
+const COOLDOWN_MS = 2 * 60 * 1000;
+
+function isKeyCoolingDown(key: string): boolean {
+  const t = groqKeyCooldown.get(key);
+  return t !== undefined && Date.now() < t;
+}
+
+function markKeyCooldown(key: string) {
+  groqKeyCooldown.set(key, Date.now() + COOLDOWN_MS);
+  // Also move to back
+  const idx = groqKeys.indexOf(key);
+  if (idx !== -1) { groqKeys.splice(idx, 1); groqKeys.push(key); }
+}
+
+function availableGroqKeys(): string[] {
+  return groqKeys.filter(k => !isKeyCoolingDown(k));
+}
+
+async function cleanWithGroq(segments: TranscriptSegment[]): Promise<any> {
+  if (groqKeys.length === 0) throw new Error("No Groq API Key");
+
   let lastError: any = null;
 
+  // Try each model × each key (keys order is dynamic)
   for (let i = 0; i < GROQ_MODELS.length; i++) {
     const idx = (lastSuccessfulGroqModelIndex + i) % GROQ_MODELS.length;
     const modelName = GROQ_MODELS[idx];
-    
-    let retries = 1; 
-    while (retries >= 0) {
+
+    const keys = availableGroqKeys();
+    if (keys.length === 0) continue; // all keys cooling down, try next model
+    for (const apiKey of keys) {
+      const groq = new Groq({ apiKey });
       try {
         console.log(`    🚀 Trying Groq model: ${modelName}...`);
         const completion = await groq.chat.completions.create({
@@ -126,23 +166,43 @@ async function cleanWithGroq(segments: TranscriptSegment[]): Promise<any> {
         const content = completion.choices[0]?.message?.content;
         if (!content) throw new Error("Empty response from Groq");
         const parsed = JSON.parse(content);
-        lastSuccessfulGroqModelIndex = idx; // Lưu lại model thành công
+        lastSuccessfulGroqModelIndex = idx;
         return parsed;
       } catch (error: any) {
-        console.warn(`    ⚠️ Groq model ${modelName} failed: ${error.message}`);
+        console.warn(`    ⚠️ Groq model ${modelName} failed: ${error.message?.slice(0, 120)}`);
         lastError = error;
-        
         if (error.status === 429 || error.message?.includes("429")) {
-          console.log(`    ⏳ Rate limit hit for ${modelName}, retrying in 5s... (${retries} left)`);
-          await sleep(5000);
-          retries--;
-          continue;
+          markKeyCooldown(apiKey); // cooldown 2 min, skip for next chunks
         }
-        break; 
       }
     }
   }
   throw lastError;
+}
+
+async function cleanWithDeepSeek(segments: TranscriptSegment[]): Promise<any> {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) throw new Error("No DeepSeek API Key");
+
+  console.log(`    🤖 Trying DeepSeek V3...`);
+  const res = await fetch("https://api.deepseek.com/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "deepseek-chat",
+      messages: [{ role: "user", content: PROMPT_TEMPLATE(JSON.stringify(segments)) }],
+      response_format: { type: "json_object" },
+      temperature: 0.1,
+    }),
+  });
+  const json = await res.json() as any;
+  if (!res.ok) throw Object.assign(new Error(JSON.stringify(json)), { status: res.status });
+  const content = json.choices[0]?.message?.content;
+  if (!content) throw new Error("Empty response from DeepSeek");
+  return JSON.parse(content);
 }
 
 function chunkSegments(segments: TranscriptSegment[], chunkSize: number = 30): TranscriptSegment[][] {
@@ -170,15 +230,23 @@ export async function cleanTranscript(segments: TranscriptSegment[]) {
 
     while (chunkRetries >= 0 && !result) {
       try {
-        // 1. Thử Groq với cơ chế rotate model
+        // 1. Groq 70b
         try {
           result = await cleanWithGroq(chunk);
         } catch (groqError: any) {
-          console.warn(`  ⚠️ All Groq models failed for chunk ${i+1}.`);
-          
-          // 2. Fallback sang Gemini với cơ chế rotate model
-          console.log(`  🔄 Switching provider to Gemini for chunk ${i+1}...`);
-          result = await cleanWithGemini(chunk);
+          console.warn(`  ⚠️ Groq failed for chunk ${i+1}.`);
+
+          // 2. DeepSeek V3
+          try {
+            console.log(`  🔄 Switching to DeepSeek for chunk ${i+1}...`);
+            result = await cleanWithDeepSeek(chunk);
+          } catch (deepseekError: any) {
+            console.warn(`  ⚠️ DeepSeek failed for chunk ${i+1}.`);
+
+            // 3. Gemini
+            console.log(`  🔄 Switching to Gemini for chunk ${i+1}...`);
+            result = await cleanWithGemini(chunk);
+          }
         }
       } catch (error: any) {
         console.error(`  ❌ All AI providers failed for chunk ${i+1}.`);
@@ -206,12 +274,8 @@ export async function cleanTranscript(segments: TranscriptSegment[]) {
       result.keywords.forEach((k: string) => allKeywords.add(k.toLowerCase()));
     }
 
-    // Throttling: Nghỉ giữa các chunk (trừ chunk cuối)
-    if (i < chunks.length - 1) {
-      const waitTime = 15000;
-      console.log(`  💤 Sleeping for ${waitTime/1000}s to avoid rate limits...`);
-      await sleep(waitTime);
-    }
+    // Short pause between chunks to avoid burst TPM
+    if (i < chunks.length - 1) await sleep(3000);
   }
 
   const finalFullText = allCleanedSegments.map(s => s.text).join(" ");

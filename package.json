@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "generate-blog": "tsx scripts/generate-blog.ts --csv"
   },
   "keywords": [],
   "author": "",
