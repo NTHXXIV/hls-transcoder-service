@@ -93,7 +93,10 @@ author: Alex
 
 ---
 
-_[Câu hỏi tương tác với người đọc — khuyến khích comment]_
+_[Câu hỏi tương tác liên quan đến nội dung bài — dẫn người đọc vào thảo luận tại cộng đồng Stag trên Facebook: [Stag - Giáo dục tài chính và đầu tư bền vững](https://www.facebook.com/groups/953803242188268)]_
+
+> Tên group: **Stag - Giáo dục tài chính và đầu tư bền vững**
+> Link: https://www.facebook.com/groups/953803242188268
 
 ---
 
@@ -137,3 +140,4 @@ Transcript được tạo bằng AI speech-to-text nên có thể còn sót lỗ
 5. **Ảnh thumbnail** — chọn file ảnh phù hợp nhất làm thumbnail, đặt trong frontmatter
 6. **Ảnh nội dung** — chỉ chèn ảnh nếu ảnh đó thực sự minh họa đoạn văn đang nói
 7. **Không chèn sponsor/quảng cáo vào giữa bài** — nội dung Stag chỉ nằm ở CTA cuối bài
+8. **Không dùng ngôn ngữ/câu mở kiểu video** — tuyệt đối không bắt đầu bằng "Chào mừng", "Xin chào mọi người", "Video hôm nay", "kênh của mình", "See you later", "Đăng ký kênh", "like và subscribe"... Bài viết blog phải mở đầu bằng nội dung/vấn đề, không phải lời chào kiểu YouTube.
