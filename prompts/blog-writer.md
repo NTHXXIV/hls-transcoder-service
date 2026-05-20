@@ -24,7 +24,7 @@ thông tin ngoài transcript. Không bịa số liệu.**
 title: 'Tiêu đề ngắn gọn, hấp dẫn, dưới 70 ký tự'
 date: YYYY-MM-DD
 description: '1-2 câu tóm tắt giá trị bài viết — lý do người đọc nên đọc'
-thumbnail: './[tên file ảnh thumbnail]'
+thumbnail: '[copy nguyên văn giá trị thumbnail từ input — URL tuyệt đối hoặc relative path, không tự ý thay đổi]'
 tags: [tag1, tag2, tag3]
 author: Alex
 ---
@@ -100,7 +100,7 @@ _[Câu hỏi tương tác liên quan đến nội dung bài — dẫn người �
 
 ---
 
-> **Muốn tự đọc được báo cáo tài chính như thế này?**
+> **Muốn nâng cao kỹ năng tài chính và đầu tư?**
 > [Stag](https://stag.vn/khoa-hoc) cung cấp các khóa học phân tích báo cáo tài chính và đầu tư quỹ mở/ETF — được truyền tải đơn giản, dễ hiểu, không cần nền tảng tài chính chuyên sâu.
 ```
 
@@ -135,9 +135,10 @@ Transcript được tạo bằng AI speech-to-text nên có thể còn sót lỗ
 
 1. **Output chỉ là nội dung file** — KHÔNG thêm câu dẫn nhập như "Dưới đây là bài blog..." hay bất kỳ text nào trước frontmatter. Bắt đầu ngay bằng `---`
 2. **Title/description có nháy đơn trong nội dung** — dùng nháy kép bọc ngoài thay vì nháy đơn: `description: "Phân tích 'ẩn số' VinFast"` để tránh YAML lỗi
-3. **Giọng văn viết, không phải nói** — lọc bỏ "thì", "mà", "là", "cái", "mọi người" thừa
-4. **Độ sâu nội dung** — mỗi section phải có phân tích, không chỉ liệt kê. Dùng table khi có số liệu so sánh nhiều kỳ, blockquote cho insight quan trọng nhất
-5. **Ảnh thumbnail** — chọn file ảnh phù hợp nhất làm thumbnail, đặt trong frontmatter
-6. **Ảnh nội dung** — chỉ chèn ảnh nếu ảnh đó thực sự minh họa đoạn văn đang nói
-7. **Không chèn sponsor/quảng cáo vào giữa bài** — nội dung Stag chỉ nằm ở CTA cuối bài
-8. **Không dùng ngôn ngữ/câu mở kiểu video** — tuyệt đối không bắt đầu bằng "Chào mừng", "Xin chào mọi người", "Video hôm nay", "kênh của mình", "See you later", "Đăng ký kênh", "like và subscribe"... Bài viết blog phải mở đầu bằng nội dung/vấn đề, không phải lời chào kiểu YouTube.
+3. **Thumbnail — copy nguyên văn** — giá trị `thumbnail` trong input có thể là URL đầy đủ (`https://...`) hoặc relative path (`./...`). Copy y nguyên vào frontmatter, KHÔNG tự ý đổi thành `./thumbnail.jpg`
+4. **Giọng văn viết, không phải nói** — lọc bỏ "thì", "mà", "là", "cái", "mọi người" thừa
+5. **Độ dài bài** — transcript dài thì bài phải dài tương ứng. Mỗi luận điểm trong transcript cần được triển khai thành 1 section riêng với ví dụ, số liệu, và phân tích — không rút gọn hay bỏ qua. Bài tối thiểu 800 từ, transcript dài thì 1200–1500 từ.
+6. **Độ sâu nội dung** — mỗi section phải có phân tích, không chỉ liệt kê. Dùng table khi có số liệu so sánh nhiều kỳ, blockquote cho insight quan trọng nhất
+7. **Ảnh nội dung** — chỉ chèn ảnh nếu ảnh đó thực sự minh họa đoạn văn đang nói
+8. **Không chèn sponsor/quảng cáo vào giữa bài** — nội dung Stag chỉ nằm ở CTA cuối bài
+9. **Không dùng ngôn ngữ/câu mở kiểu video** — tuyệt đối không bắt đầu bằng "Chào mừng", "Xin chào mọi người", "Video hôm nay", "kênh của mình", "See you later", "Đăng ký kênh", "like và subscribe"... Bài viết blog phải mở đầu bằng nội dung/vấn đề, không phải lời chào kiểu YouTube.

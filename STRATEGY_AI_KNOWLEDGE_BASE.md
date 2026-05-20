@@ -70,42 +70,71 @@ Script: `scripts/generate-blog.ts` — chạy thủ công khi có CSV mới.
 
 ### Input
 - File CSV export từ Google Sheets (cột: `Video_code`, `Video_title`, `Transcript`, `Thumbnail`, `Published_link`, `Ngày air`)
+- `Transcript` field: phần trước timestamp đầu tiên là `resources` (links, tài liệu tham khảo), phần còn lại là nội dung theo dạng `(mm:ss) text...`
 
 ### Flow
 ```
-CSV → filter rows → hash check → Groq clean transcript → Groq/OpenAI generate blog → stagapps
+CSV → filter → diff check → [thumbnail: Drive → R2] → [new: clean + AI generate] → [existing: update fields] → stagapps
 ```
 
-1. **Filter:** Bỏ qua row không có transcript, `HARD_SKIP_CODES` (C524), và series/diary (`696`, `Series D\d+`, `Tuần \d+`)
-2. **Hash check (3 cases):**
-   - Không đổi → skip
-   - Chỉ thumbnail URL đổi → re-download ảnh, không gọi AI
-   - Nội dung đổi → full reprocess (Groq + AI)
-3. **Clean transcript:** Groq rotate qua `llama-3.1-8b-instant` → `llama-3.3-70b-versatile` → `llama-4-scout`, hỗ trợ 2 API key (`GROQ_API_KEY`, `GROQ_API_KEY_2`)
-4. **Generate blog:** Groq (cùng model list) → fallback OpenAI `gpt-4o-mini`
-5. **Output:**
-   - `content/blog/bai-viet/<slug>/index.md`
-   - `public/blog/bai-viet/<slug>/thumbnail.jpg`
+1. **Filter:** Bỏ qua row không có transcript, `HARD_SKIP_CODES` (C517, C524), series/diary (`696`, `Series D\d+`, `Tuần \d+`)
+
+2. **State migration:** Lần đầu chạy sau update, tự động migrate state cũ sang format mới (không cần can thiệp thủ công)
+
+3. **Diff check (per field, độc lập):**
+   - `title_hash` đổi → update frontmatter title, không gọi AI
+   - `youtube_hash` đổi → inject/replace iframe trong markdown, không gọi AI
+   - `thumbnail_hash` đổi → re-upload thumbnail lên R2, update frontmatter
+   - Bài mới (chưa có trong state) → full pipeline (thumbnail + clean + AI generate)
+
+4. **Thumbnail:** Download từ Google Drive → upload lên Cloudflare R2 (`blog/bai-viet/<slug>/thumbnail.jpg`) → lưu URL tuyệt đối. Không lưu ảnh vào repo.
+
+5. **Clean transcript:** Groq `llama-3.3-70b-versatile` (3 keys rotate) → DeepSeek V3 → Gemini Flash → OpenAI `gpt-4o-mini`. Output: `cleanedFullText` + `summary` + `keywords`.
+
+6. **Generate blog:** **Gemini 2.5 Flash only** (3 keys rotate). Nếu hết quota → dừng, thông báo rõ, không fallback model kém hơn. Input gồm `cleanedFullText` + `outline` (summary + keywords từ bước clean) để Gemini có khung cấu trúc. Post-process sau generate: force ghi đúng `title` và `thumbnail` từ CSV/R2 vào frontmatter, không phụ thuộc model output.
+
+7. **Output:**
+   - `content/blog/bai-viet/<slug>/index.md` (markdown + frontmatter)
+   - Thumbnail lưu trên R2, URL tuyệt đối trong frontmatter
+
+### Ảnh resource trong nội dung bài
+Hiện tại là luồng thủ công riêng — chưa tích hợp vào CSV pipeline. Ảnh resource được upload lên R2 và reference bằng URL tuyệt đối trong markdown. *(TODO: define cột `Resource_Images` trong CSV và thêm bước upload R2 trước khi gọi AI)*
 
 ### State
-`/Users/nth/stagapps/apps/stag/content/blog-state.json` — commit cùng stagapps.
+`content/blog-state.json` trong repo stagapps — commit cùng code.
 ```json
 {
-  "C500": { "slug": "...", "hash": "abc123", "thumbnail_hash": "def456", "processed_at": "..." }
+  "C500": {
+    "slug": "sai-lam-tai-chinh-...",
+    "title_hash": "d80f28dd54",
+    "youtube_hash": "abc123",
+    "thumbnail_hash": "afed4536c7",
+    "processed_at": "2026-05-20T..."
+  }
 }
 ```
 
 ### Cách chạy
 ```bash
-npm run generate-blog "path/to/file.csv" --all
-npm run generate-blog "path/to/file.csv" --code C500
+npx tsx --env-file=.env scripts/generate-blog.ts --csv "path/to/file.csv" --all
+npx tsx --env-file=.env scripts/generate-blog.ts --csv "path/to/file.csv" --code C500
 ```
 
 ### Env cần thiết
 ```
 GROQ_API_KEY
-GROQ_API_KEY_2      # optional, dùng khi key 1 hết quota
-OPENAI_API_KEY      # optional, fallback blog generation
+GROQ_API_KEY_2
+GROQ_API_KEY_3
+GEMINI_API_KEY
+GEMINI_API_KEY_2
+GEMINI_API_KEY_3
+DEEPSEEK_API_KEY
+OPENAI_API_KEY          # fallback cuối
+R2_ENDPOINT             # https://<account-id>.r2.cloudflarestorage.com
+R2_ACCESS_KEY_ID
+R2_SECRET_ACCESS_KEY
+R2_BUCKET
+R2_PUBLIC_BASE_URL      # https://r2.stag.vn
 ```
 
 ---

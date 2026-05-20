@@ -10,31 +10,37 @@
  *
  * Flow:
  *   1. Parse CSV → pick row(s), skip if no transcript / hard-skip / series
- *   2. Compare hash vs state.json → skip / thumbnail-only / full reprocess
- *   3. Groq → clean transcript
- *   4. Download thumbnail from Drive (if available)
- *   5. Groq/OpenAI → generate blog (with YouTube embed if published)
+ *   2. Diff check per field (title_hash, youtube_hash, thumbnail_hash) vs state.json
+ *   3. For title/youtube/thumbnail changes: update without AI
+ *   4. For new posts only: Groq → clean transcript → Gemini 2.5 Flash → generate blog
+ *   5. Thumbnail: Drive → R2 (URL stored in frontmatter, not in repo)
  *   6. Write to stagapps:
  *        content/blog/bai-viet/<slug>/index.md
- *        public/blog/bai-viet/<slug>/thumbnail.jpg  (if downloaded)
  *   7. Update state.json
  */
 
 import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import Groq from "groq-sdk";
+import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { cleanTranscript, type TranscriptSegment } from "../src/transcribe/cleaner.js";
+import { createR2Client } from "../src/shared/r2.js";
 
 const BLOG_PROMPT_PATH = path.resolve("./prompts/blog-writer.md");
 const STAGAPPS_ROOT    = path.resolve("/Users/nth/stagapps/apps/stag");
 const STATE_PATH       = path.join(STAGAPPS_ROOT, "content/blog-state.json");
 const CONTENT_BAI_VIET = path.join(STAGAPPS_ROOT, "content/blog/bai-viet");
-const PUBLIC_BAI_VIET  = path.join(STAGAPPS_ROOT, "public/blog/bai-viet");
+
+const R2_ENDPOINT        = process.env.R2_ENDPOINT ?? "";
+const R2_ACCESS_KEY_ID   = process.env.R2_ACCESS_KEY_ID ?? "";
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY ?? "";
+const R2_BUCKET          = process.env.R2_BUCKET ?? "";
+const R2_PUBLIC_BASE_URL = (process.env.R2_PUBLIC_BASE_URL ?? "").replace(/\/$/, "");
 
 // Rows to hard-skip entirely (wrong content, already published elsewhere, etc.)
-const HARD_SKIP_CODES = new Set(["C524"]);
+const HARD_SKIP_CODES = new Set(["C524", "C517"]);
 
 // ─── Vietnamese slugify ───────────────────────────────────────────────────────
 
@@ -146,8 +152,9 @@ function getValidRows(rows: Record<string, string>[]): Record<string, string>[] 
 
 interface StateEntry {
   slug: string;
-  hash: string;           // hash of content (title + transcript + published_link)
-  thumbnail_hash: string; // hash of thumbnail URL only
+  title_hash: string;
+  youtube_hash: string;
+  thumbnail_hash: string;
   processed_at: string;
 }
 
@@ -163,17 +170,17 @@ async function saveState(state: Record<string, StateEntry>): Promise<void> {
   await fs.writeFile(STATE_PATH, JSON.stringify(state, null, 2));
 }
 
-function hashContent(row: Record<string, string>): string {
-  const key = [
-    row["Video_title"] ?? "",
-    row["Transcript"] ?? "",
-    row["Published_link"] ?? "",
-  ].join("|");
-  return createHash("md5").update(key).digest("hex").slice(0, 10);
+function md5(s: string): string {
+  return createHash("md5").update(s).digest("hex").slice(0, 10);
 }
-
+function hashTitle(row: Record<string, string>): string {
+  return md5(row["Video_title"] ?? "");
+}
+function hashYoutube(row: Record<string, string>): string {
+  return md5(row["Published_link"]?.trim() ?? "");
+}
 function hashThumbnail(row: Record<string, string>): string {
-  return createHash("md5").update(row["Thumbnail"] ?? "").digest("hex").slice(0, 10);
+  return md5(row["Thumbnail"] ?? "");
 }
 
 // ─── Date parser ──────────────────────────────────────────────────────────────
@@ -203,24 +210,66 @@ function youtubeEmbed(videoId: string): string {
   return `<iframe width="100%" style="aspect-ratio:16/9;border:0;border-radius:8px" src="https://www.youtube.com/embed/${videoId}" allowfullscreen></iframe>`;
 }
 
-// ─── Thumbnail download ───────────────────────────────────────────────────────
+async function updateTitle(mdPath: string, newTitle: string): Promise<void> {
+  let md = await fs.readFile(mdPath, "utf-8");
+  md = md.replace(/^(title:\s*).*$/m, `$1'${newTitle.replace(/'/g, "\\'")}'`);
+  await fs.writeFile(mdPath, md, "utf-8");
+}
+
+async function updateYouTube(mdPath: string, youtubeUrl: string): Promise<void> {
+  const ytId = extractYouTubeId(youtubeUrl);
+  if (!ytId) return;
+  const iframe = youtubeEmbed(ytId);
+  let md = await fs.readFile(mdPath, "utf-8");
+  if (/<iframe/i.test(md)) {
+    md = md.replace(/<iframe[\s\S]*?<\/iframe>/i, iframe);
+  } else {
+    // Inject before first ## heading
+    const m = md.match(/^##\s/m);
+    if (m?.index) {
+      md = md.slice(0, m.index) + iframe + "\n\n" + md.slice(m.index);
+    }
+  }
+  await fs.writeFile(mdPath, md, "utf-8");
+}
+
+// ─── Thumbnail: download from Drive → upload to R2 ───────────────────────────
 
 function extractDriveFileId(url: string): string | null {
   const m = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
   return m ? m[1]! : null;
 }
 
-async function downloadThumbnail(driveUrl: string, destPath: string): Promise<boolean> {
+async function downloadAndUploadThumbnail(driveUrl: string, slug: string): Promise<string | null> {
   const fileId = extractDriveFileId(driveUrl);
-  if (!fileId) return false;
+  if (!fileId) return null;
+  if (!R2_ENDPOINT || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET) {
+    console.warn("  ⚠️  R2 env vars not set — skipping thumbnail upload");
+    return null;
+  }
+  const tmpPath = path.join(os.tmpdir(), `thumbnail-${slug}.jpg`);
   try {
     const downloadUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
-    execSync(`curl -sL -o "${destPath}" "${downloadUrl}"`, { stdio: "pipe" });
-    const stat = await fs.stat(destPath);
-    if (stat.size < 1024) { await fs.unlink(destPath); return false; }
-    return true;
-  } catch {
-    return false;
+    execSync(`curl -sL -o "${tmpPath}" "${downloadUrl}"`, { stdio: "pipe" });
+    const stat = await fs.stat(tmpPath);
+    if (stat.size < 1024) { await fs.unlink(tmpPath); return null; }
+
+    const r2Key = `blog/bai-viet/${slug}/thumbnail.jpg`;
+    const body = await fs.readFile(tmpPath);
+    const client = createR2Client(R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY);
+    await client.send(new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: r2Key,
+      Body: body,
+      ContentType: "image/jpeg",
+      CacheControl: "public, max-age=31536000, immutable",
+    }));
+    await fs.unlink(tmpPath);
+    return `${R2_PUBLIC_BASE_URL}/${r2Key}`;
+  } catch (err: any) {
+    console.warn(`  ⚠️  Thumbnail upload failed: ${err.message}`);
+    try { await fs.unlink(tmpPath); } catch {}
+    return null;
   }
 }
 
@@ -251,12 +300,6 @@ function parseTranscript(transcript: string): ParsedTranscript {
 }
 
 // ─── Blog Generation ──────────────────────────────────────────────────────────
-
-const groqKeys: string[] = [
-  process.env.GROQ_API_KEY,
-  process.env.GROQ_API_KEY_2,
-  process.env.GROQ_API_KEY_3,
-].filter(Boolean) as string[];
 
 // ─── Cooldown / retry abstraction ────────────────────────────────────────────
 
@@ -309,7 +352,8 @@ async function generateBlog(
   cleanedTranscript: string,
   resources: string,
   slug: string,
-  hasThumbnail: boolean,
+  thumbnailUrl: string | null,
+  outline?: { summary: string; keywords: string[] },
 ): Promise<string> {
   const promptTemplate = await fs.readFile(BLOG_PROMPT_PATH, "utf-8");
   const promptBody = promptTemplate.replace(/^---[\s\S]*?---\n/, "").trim();
@@ -323,6 +367,13 @@ async function generateBlog(
     ? `**resources** (links, tài liệu tham khảo — quyết định chèn vào vị trí phù hợp: inline, cuối section, hoặc cuối bài):\n${resources}\n`
     : "";
 
+  const outlineSection = outline?.summary
+    ? `**outline gợi ý** (tóm tắt cấu trúc nội dung từ transcript — dùng làm khung, đảm bảo bài cover đủ các điểm này):
+Tóm tắt: ${outline.summary}
+Từ khóa chính: ${outline.keywords.join(", ")}
+`
+    : "";
+
   const prompt = `${promptBody}
 
 ---
@@ -331,9 +382,9 @@ async function generateBlog(
 
 **title** (copy nguyên văn vào frontmatter, KHÔNG rút gọn hay đặt lại): ${title}
 **date**: ${airDate}
-**thumbnail**: ${hasThumbnail ? "./thumbnail.jpg" : "không có — bỏ qua field thumbnail"}
+**thumbnail**: ${thumbnailUrl ? thumbnailUrl : "không có — bỏ qua field thumbnail"}
 **youtube embed**: ${ytId ? `chèn iframe sau đoạn mở, trước heading đầu tiên:\n${youtubeEmbed(ytId)}` : "không có"}
-${resourcesSection}
+${outlineSection}${resourcesSection}
 **transcript** (đã được làm sạch):
 ${cleanedTranscript}
 
@@ -346,21 +397,12 @@ Viết file index.md:`;
     process.env.GEMINI_API_KEY_2,
     process.env.GEMINI_API_KEY_3,
   ].filter(Boolean) as string[];
-  const { GoogleGenerativeAI } = await import("@google/generative-ai");
 
-  const makeGroqAttempt = (model: string, apiKey: string): Attempt => ({
-    id: `groq:${model}:${apiKey.slice(-6)}`,
-    label: `Groq ${model.split("/").pop()} (key …${apiKey.slice(-6)})`,
-    fn: async () => {
-      const client = new Groq({ apiKey });
-      const completion = await client.chat.completions.create({
-        model,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.3,
-      });
-      return completion.choices[0]?.message?.content ?? "";
-    },
-  });
+  if (geminiKeys.length === 0) {
+    throw new Error("No Gemini API keys set. Set GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3 in .env");
+  }
+
+  const { GoogleGenerativeAI } = await import("@google/generative-ai");
 
   const makeGeminiAttempt = (model: string, apiKey: string): Attempt => ({
     id: `gemini:${model}:${apiKey.slice(-6)}`,
@@ -377,142 +419,125 @@ Viết file index.md:`;
     },
   });
 
-  const deepseekKey = process.env.DEEPSEEK_API_KEY;
+  const attempts: Attempt[] = geminiKeys.map(k => makeGeminiAttempt("gemini-2.5-flash", k));
 
-  const attempts: Attempt[] = [
-    // Priority 1: Groq 70b (best Groq quality)
-    ...groqKeys.map(k => makeGroqAttempt("llama-3.3-70b-versatile", k)),
-    // Priority 2: DeepSeek V3 (high quality, OpenAI-compatible)
-    ...(deepseekKey ? [{
-      id: `deepseek:deepseek-chat:${deepseekKey.slice(-6)}`,
-      label: `DeepSeek V3 (key …${deepseekKey.slice(-6)})`,
-      cooldownMs: 5 * 60 * 1000,
-      fn: async () => {
-        const res = await fetch("https://api.deepseek.com/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${deepseekKey}`,
-          },
-          body: JSON.stringify({
-            model: "deepseek-chat",
-            messages: [{ role: "user", content: prompt }],
-            temperature: 0.3,
-          }),
-        });
-        const json = await res.json() as any;
-        if (!res.ok) throw Object.assign(new Error(JSON.stringify(json)), { status: res.status });
-        return json.choices[0]?.message?.content ?? "";
-      },
-    }] : []),
-    // Priority 3: Gemini 2.5 Flash (high quality, better than weak Groq models)
-    ...geminiKeys.map(k => makeGeminiAttempt("gemini-2.5-flash", k)),
-    // Priority 3: Gemini 2.0 Flash
-    ...geminiKeys.map(k => makeGeminiAttempt("gemini-2.0-flash", k)),
-    // Priority 4: OpenAI fallback
-    ...(process.env.OPENAI_API_KEY ? [{
-      id: "openai:gpt-4o-mini",
-      label: "OpenAI gpt-4o-mini",
-      fn: async () => {
-        const res = await fetch("https://api.openai.com/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: "gpt-4o-mini",
-            messages: [{ role: "user", content: prompt }],
-            temperature: 0.3,
-          }),
-        });
-        const json = await res.json() as any;
-        if (!res.ok) throw new Error(JSON.stringify(json));
-        return json.choices[0]?.message?.content ?? "";
-      },
-    }] : []),
-  ];
-
-  console.log(`  📝 Generating blog (${attempts.length} provider-key combos available)...`);
-  return tryInOrder(attempts);
+  console.log(`  📝 Generating blog via Gemini 2.5 Flash (${attempts.length} key(s))...`);
+  let result: string;
+  try {
+    result = await tryInOrder(attempts);
+  } catch (err: any) {
+    throw new Error(
+      `All Gemini keys failed or quota exhausted. Wait until quota resets (daily UTC) and retry.\nLast error: ${err.message}`
+    );
+  }
+  return result;
 }
 
 // ─── Process single row ───────────────────────────────────────────────────────
 
+interface ChangeFlags {
+  isNew: boolean;
+  titleChanged: boolean;
+  youtubeChanged: boolean;
+  thumbnailChanged: boolean;
+}
+
 async function processRow(
   row: Record<string, string>,
   state: Record<string, StateEntry>,
-  thumbnailOnly = false,
+  flags: ChangeFlags,
 ): Promise<void> {
-  const videoCode   = row["Video_code"]!;
-  const title       = row["Video_title"]!;
-  const contentType = getContentType(row);
+  const videoCode = row["Video_code"]!;
+  const title     = row["Video_title"]!;
 
   console.log(`\n${"─".repeat(60)}`);
-  console.log(`📹 [${videoCode}] [${contentType}] ${title}`);
+  const tag = flags.isNew ? "🆕 NEW" : "🔧 UPDATE";
+  console.log(`${tag} [${videoCode}] ${title}`);
   console.log(`${"─".repeat(60)}`);
 
-  // Use existing slug from state (reprocess case) or generate new one
-  const baseSlug = slugify(title);
-  const slug = state[videoCode]?.slug ?? await uniqueSlug(baseSlug);
+  const slug = state[videoCode]?.slug ?? await uniqueSlug(slugify(title));
   console.log(`   🔗 Slug: ${slug}`);
 
   const contentDir = path.join(CONTENT_BAI_VIET, slug);
-  const publicDir  = path.join(PUBLIC_BAI_VIET,  slug);
-  await fs.mkdir(contentDir, { recursive: true });
-  await fs.mkdir(publicDir,  { recursive: true });
+  // Note: don't mkdir here — create only just before writing to avoid leaving
+  // empty dirs on failure that cause slug collisions on retry (uniqueSlug sees them)
+  const mdPath = path.join(contentDir, "index.md");
 
-  // 1. Download thumbnail
-  let hasThumbnail = false;
-  const thumbSrc = row["Thumbnail"]?.trim() ?? "";
-  if (thumbSrc) {
-    process.stdout.write(`\n📷 Downloading thumbnail...`);
-    hasThumbnail = await downloadThumbnail(thumbSrc, path.join(publicDir, "thumbnail.jpg"));
-    console.log(hasThumbnail ? " ✅" : " ❌ failed, skipping");
-  } else {
-    console.log(`\n📷 No thumbnail`);
+  // ── Thumbnail ──────────────────────────────────────────────────────────────
+  let thumbnailUrl: string | null = null;
+  if (flags.thumbnailChanged) {
+    const thumbSrc = row["Thumbnail"]?.trim() ?? "";
+    if (thumbSrc) {
+      process.stdout.write(`\n📷 Uploading thumbnail...`);
+      thumbnailUrl = await downloadAndUploadThumbnail(thumbSrc, slug);
+      console.log(thumbnailUrl ? ` ✅` : " ❌ failed");
+      if (thumbnailUrl && !flags.isNew) {
+        let md = await fs.readFile(mdPath, "utf-8");
+        md = md.replace(/^(thumbnail:\s*).*$/m, `$1'${thumbnailUrl}'`);
+        await fs.writeFile(mdPath, md, "utf-8");
+      }
+    }
   }
 
-  if (thumbnailOnly) {
-    // Only thumbnail changed — skip AI, just update thumbnail_hash
-    state[videoCode]!.thumbnail_hash = hashThumbnail(row);
-    state[videoCode]!.processed_at = new Date().toISOString();
+  // ── Non-AI updates (existing posts only) ───────────────────────────────────
+  if (!flags.isNew) {
+    if (flags.titleChanged) {
+      await updateTitle(mdPath, title);
+      console.log(`\n✏️  Title updated`);
+    }
+    if (flags.youtubeChanged) {
+      const ytUrl = row["Published_link"]?.trim() ?? "";
+      if (ytUrl) {
+        await updateYouTube(mdPath, ytUrl);
+        console.log(`\n▶️  YouTube embed updated`);
+      }
+    }
+    state[videoCode] = {
+      ...state[videoCode]!,
+      title_hash: hashTitle(row),
+      youtube_hash: hashYoutube(row),
+      thumbnail_hash: hashThumbnail(row),
+      processed_at: new Date().toISOString(),
+    };
     await saveState(state);
-    console.log(`\n🎉 Done (thumbnail updated)`);
+    console.log(`\n🎉 Done`);
     return;
   }
 
-  // 2. Clean transcript with Groq
+  // ── Full AI generation (new posts only) ────────────────────────────────────
   const { segments, resources } = parseTranscript(row["Transcript"]!);
   console.log(`\n🧹 Cleaning transcript (${segments.length} segments)...`);
   if (resources) console.log(`   📎 Resources found (${resources.length} chars)`);
-  const { cleanedFullText } = await cleanTranscript(segments);
+  const { cleanedFullText, summary, keywords } = await cleanTranscript(segments);
   console.log(`   ✅ Cleaned (${cleanedFullText.length} chars)`);
+  if (summary && keywords.length > 0) {
+    console.log(`   📋 Outline: ${keywords.slice(0, 5).join(", ")}...`);
+  }
 
-  // 3. Generate blog
   console.log(`\n✍️  Generating blog...`);
-  let blog = await generateBlog(row, cleanedFullText, resources, slug, hasThumbnail);
-
-  // Strip code fence wrapping if model wrapped the whole output (e.g. ```markdown ... ```)
+  let blog = await generateBlog(row, cleanedFullText, resources, slug, thumbnailUrl, { summary, keywords });
   blog = blog.replace(/^```(?:markdown|yaml|md)?\n([\s\S]*?)```\s*$/m, "$1").trim();
-  // Strip any leading text before frontmatter (e.g. "Dưới đây là bài blog...")
-  const frontmatterStart = blog.indexOf("---");
-  if (frontmatterStart > 0) blog = blog.slice(frontmatterStart);
+  const fmStart = blog.indexOf("---");
+  if (fmStart > 0) blog = blog.slice(fmStart);
 
-  // 4. Write output
-  await fs.writeFile(path.join(contentDir, "index.md"), blog, "utf-8");
+  // Post-process: force correct title and thumbnail regardless of what model wrote
+  blog = blog.replace(/^(title:\s*).*$/m, `$1'${title.replace(/'/g, "\\'")}'`);
+  if (thumbnailUrl) {
+    blog = blog.replace(/^(thumbnail:\s*).*$/m, `$1'${thumbnailUrl}'`);
+  }
+
+  await fs.mkdir(contentDir, { recursive: true });
+  await fs.writeFile(mdPath, blog, "utf-8");
   console.log(`   ✅ content/blog/bai-viet/${slug}/index.md`);
-  if (hasThumbnail) console.log(`   ✅ public/blog/bai-viet/${slug}/thumbnail.jpg`);
 
-  // Update state
   state[videoCode] = {
     slug,
-    hash: hashContent(row),
+    title_hash: hashTitle(row),
+    youtube_hash: hashYoutube(row),
     thumbnail_hash: hashThumbnail(row),
     processed_at: new Date().toISOString(),
   };
   await saveState(state);
-
   console.log(`\n🎉 Done`);
 }
 
@@ -532,7 +557,7 @@ async function main() {
     csv:      getFlag("--csv"),
   };
 
-  if (!process.env.GROQ_API_KEY) throw new Error("GROQ_API_KEY not set");
+  if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY not set");
   if (!opts.csv) throw new Error("Missing --csv <path>");
 
   const state = await loadState();
@@ -555,26 +580,68 @@ async function main() {
     rowsToProcess = [validRows[idx]!];
   }
 
-  // Hash-based diff: 3 cases
-  type RunItem = { row: Record<string, string>; thumbnailOnly: boolean };
+  // ── Migrate old state format (hash → title_hash + youtube_hash) ─────────────
+  let migrated = 0;
+  const csvMap = Object.fromEntries(validRows.map(r => [r["Video_code"]!, r]));
+  for (const [code, entry] of Object.entries(state)) {
+    if (!("title_hash" in entry)) {
+      const row = csvMap[code];
+      // Check if youtube link is already embedded in the markdown
+      const mdPath = path.join(CONTENT_BAI_VIET, entry.slug, "index.md");
+      let hasIframe = false;
+      try { hasIframe = /<iframe/i.test(await fs.readFile(mdPath, "utf-8")); } catch {}
+      const ytUrl = row?.["Published_link"]?.trim() ?? "";
+      // Force youtube update if link exists but not yet in markdown
+      (entry as any).title_hash   = row ? hashTitle(row) : "";
+      (entry as any).youtube_hash = (ytUrl && !hasIframe) ? "" : (row ? hashYoutube(row) : "");
+      (entry as any).thumbnail_hash ??= "";
+      delete (entry as any).hash;
+      migrated++;
+    }
+  }
+  if (migrated > 0) {
+    await saveState(state);
+    console.log(`   ⬆️  Migrated ${migrated} state entries to new format`);
+  }
+
+  // ── Diff: determine what changed per row ─────────────────────────────────
+  type RunItem = { row: Record<string, string>; flags: ChangeFlags };
   const toRun: RunItem[] = [];
 
   for (const row of rowsToProcess) {
-    const code = row["Video_code"]!;
+    const code  = row["Video_code"]!;
     const entry = state[code];
-    const contentChanged = !entry || entry.hash !== hashContent(row);
-    const thumbChanged   = !entry || entry.thumbnail_hash !== hashThumbnail(row);
 
-    if (!contentChanged && !thumbChanged) {
+    if (!entry) {
+      console.log(`\n🆕 New [${code}]`);
+      toRun.push({ row, flags: { isNew: true, titleChanged: false, youtubeChanged: false, thumbnailChanged: true } });
+      continue;
+    }
+
+    const flags: ChangeFlags = {
+      isNew: false,
+      titleChanged:     entry.title_hash     !== hashTitle(row),
+      youtubeChanged:   entry.youtube_hash   !== hashYoutube(row),
+      thumbnailChanged: entry.thumbnail_hash !== hashThumbnail(row),
+    };
+
+    const changes = [
+      flags.titleChanged     && "title",
+      flags.youtubeChanged   && "youtube",
+      flags.thumbnailChanged && "thumbnail",
+    ].filter(Boolean).join(", ");
+
+    if (!changes) {
       console.log(`\n⏩ Skip [${code}] unchanged`);
-    } else if (!contentChanged && thumbChanged) {
-      console.log(`\n🖼  [${code}] thumbnail changed — re-download only`);
-      toRun.push({ row, thumbnailOnly: true });
     } else {
-      console.log(entry ? `\n🔄 Reprocess [${code}] content changed` : `\n🆕 New [${code}]`);
-      toRun.push({ row, thumbnailOnly: false });
+      console.log(`\n🔧 Update [${code}]: ${changes}`);
+      toRun.push({ row, flags });
     }
   }
+
+  const needsAI = toRun.filter(i => i.flags.isNew);
+  const noAI    = toRun.filter(i => !i.flags.isNew);
+  console.log(`\n📊 Summary: ${needsAI.length} need AI, ${noAI.length} no-AI updates, ${rowsToProcess.length - toRun.length} unchanged`);
 
   if (toRun.length === 0) {
     console.log(`\nNothing to process.`);
@@ -582,9 +649,9 @@ async function main() {
   }
 
   for (let i = 0; i < toRun.length; i++) {
-    const { row, thumbnailOnly } = toRun[i]!;
+    const { row, flags } = toRun[i]!;
     if (opts.all) console.log(`\n[${i + 1}/${toRun.length}]`);
-    await processRow(row, state, thumbnailOnly);
+    await processRow(row, state, flags);
   }
 }
 
