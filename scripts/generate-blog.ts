@@ -30,8 +30,10 @@ import { createR2Client } from "../src/shared/r2.js";
 
 const BLOG_PROMPT_PATH = path.resolve("./prompts/blog-writer.md");
 const STAGAPPS_ROOT    = path.resolve("/Users/nth/stagapps/apps/stag");
-const STATE_PATH       = path.join(STAGAPPS_ROOT, "content/blog-state.json");
 const CONTENT_BAI_VIET = path.join(STAGAPPS_ROOT, "content/blog/bai-viet");
+
+// Resolved at runtime from --state flag (default: blog-state.json)
+let STATE_PATH = path.join(STAGAPPS_ROOT, "content/blog-state.json");
 
 const R2_ENDPOINT        = process.env.R2_ENDPOINT ?? "";
 const R2_ACCESS_KEY_ID   = process.env.R2_ACCESS_KEY_ID ?? "";
@@ -199,7 +201,7 @@ function parseAirDate(raw: string): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-// ─── YouTube embed helper ─────────────────────────────────────────────────────
+// ─── Video embed helpers ──────────────────────────────────────────────────────
 
 function extractYouTubeId(url: string): string | null {
   const m = url.match(/(?:v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
@@ -210,6 +212,25 @@ function youtubeEmbed(videoId: string): string {
   return `<iframe width="100%" style="aspect-ratio:16/9;border:0;border-radius:8px" src="https://www.youtube.com/embed/${videoId}" allowfullscreen></iframe>`;
 }
 
+function extractTikTokId(url: string): string | null {
+  const m = url.match(/tiktok\.com\/@[^/]+\/video\/(\d+)/);
+  return m ? m[1]! : null;
+}
+
+function tiktokEmbed(_videoId: string, videoUrl: string): string {
+  return `<a href="${videoUrl}" target="_blank" rel="noopener" class="tiktok-link">▶ Xem video trên TikTok</a>`;
+}
+
+type EmbedResult = { html: string; type: "youtube" | "tiktok" } | null;
+
+function buildEmbed(publishedLink: string): EmbedResult {
+  const ytId = extractYouTubeId(publishedLink);
+  if (ytId) return { html: youtubeEmbed(ytId), type: "youtube" };
+  const ttId = extractTikTokId(publishedLink);
+  if (ttId) return { html: tiktokEmbed(ttId, publishedLink), type: "tiktok" };
+  return null;
+}
+
 async function updateTitle(mdPath: string, newTitle: string): Promise<void> {
   let md = await fs.readFile(mdPath, "utf-8");
   md = md.replace(/^(title:\s*).*$/m, `$1'${newTitle.replace(/'/g, "\\'")}'`);
@@ -217,9 +238,9 @@ async function updateTitle(mdPath: string, newTitle: string): Promise<void> {
 }
 
 async function updateYouTube(mdPath: string, youtubeUrl: string): Promise<void> {
-  const ytId = extractYouTubeId(youtubeUrl);
-  if (!ytId) return;
-  const iframe = youtubeEmbed(ytId);
+  const embed = buildEmbed(youtubeUrl);
+  if (!embed) return;
+  const iframe = embed.html;
   let md = await fs.readFile(mdPath, "utf-8");
   if (/<iframe/i.test(md)) {
     md = md.replace(/<iframe[\s\S]*?<\/iframe>/i, iframe);
@@ -360,8 +381,8 @@ async function generateBlog(
 
   const title   = row["Video_title"]!;
   const airDate = parseAirDate(row["Ngày air"]?.trim() || row["Ngày source raw được gửi"]?.trim() || "");
-  const ytUrl   = row["Published_link"]?.trim() ?? "";
-  const ytId    = ytUrl ? extractYouTubeId(ytUrl) : null;
+  const pubUrl  = row["Published_link"]?.trim() ?? "";
+  const embed   = pubUrl ? buildEmbed(pubUrl) : null;
 
   const resourcesSection = resources
     ? `**resources** (links, tài liệu tham khảo — quyết định chèn vào vị trí phù hợp: inline, cuối section, hoặc cuối bài):\n${resources}\n`
@@ -383,7 +404,7 @@ Từ khóa chính: ${outline.keywords.join(", ")}
 **title** (copy nguyên văn vào frontmatter, KHÔNG rút gọn hay đặt lại): ${title}
 **date**: ${airDate}
 **thumbnail**: ${thumbnailUrl ? thumbnailUrl : "không có — bỏ qua field thumbnail"}
-**youtube embed**: ${ytId ? `chèn iframe sau đoạn mở, trước heading đầu tiên:\n${youtubeEmbed(ytId)}` : "không có"}
+**video embed**: ${embed ? `chèn sau đoạn mở, trước heading đầu tiên:\n${embed.html}` : "không có"}
 ${outlineSection}${resourcesSection}
 **transcript** (đã được làm sạch):
 ${cleanedTranscript}
@@ -555,10 +576,18 @@ async function main() {
     code:     getFlag("--code"),
     rowIndex: getFlag("--row") !== undefined ? parseInt(getFlag("--row")!) : undefined,
     csv:      getFlag("--csv"),
+    state:    getFlag("--state"),
   };
 
   if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY not set");
   if (!opts.csv) throw new Error("Missing --csv <path>");
+
+  if (opts.state) {
+    STATE_PATH = path.isAbsolute(opts.state)
+      ? opts.state
+      : path.join(STAGAPPS_ROOT, "content", opts.state);
+  }
+  console.log(`\n📁 State file: ${path.relative(STAGAPPS_ROOT, STATE_PATH)}`);
 
   const state = await loadState();
 
