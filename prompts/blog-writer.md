@@ -110,9 +110,6 @@ Tối đa **65 ký tự**.
 
 _[Câu hỏi tương tác liên quan đến nội dung bài — dẫn người đọc vào thảo luận tại cộng đồng Stag trên Facebook: [Stag - Giáo dục tài chính và đầu tư bền vững](https://www.facebook.com/groups/953803242188268)]_
 
-> Tên group: **Stag - Giáo dục tài chính và đầu tư bền vững**
-> Link: https://www.facebook.com/groups/953803242188268
-
 ---
 
 > **Muốn nâng cao kỹ năng tài chính và đầu tư?**

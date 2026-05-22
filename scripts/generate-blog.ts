@@ -436,9 +436,37 @@ Viết file index.md:`;
     },
   });
 
-  const attempts: Attempt[] = geminiKeys.map(k => makeGeminiAttempt("gemini-2.5-flash", k));
+  // CLI prompt: replace "Viết file index.md:" to avoid triggering agentic tool use
+  const cliPrompt = prompt.replace(/Viết file index\.md:$/, "Trả về toàn bộ nội dung của file index.md (chỉ trả về text, không dùng tool hay ghi file):");
 
-  console.log(`  📝 Generating blog via Gemini 2.5 Flash (${attempts.length} key(s))...`);
+  const geminiCliAttempt: Attempt = {
+    id: "gemini-cli",
+    label: "Gemini CLI (Pro)",
+    cooldownMs: 60 * 1000,
+    fn: async () => {
+      const { execSync } = await import("node:child_process");
+      const { writeFileSync, unlinkSync } = await import("node:fs");
+      const { tmpdir } = await import("node:os");
+      const tmpFile = path.join(tmpdir(), `gemini-prompt-${Date.now()}.txt`);
+      try {
+        writeFileSync(tmpFile, cliPrompt, "utf-8");
+        const out = execSync(
+          `cat "${tmpFile}" | gemini -p "" --output-format text --approval-mode plan`,
+          { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, timeout: 120_000 }
+        );
+        return out.trim();
+      } finally {
+        try { unlinkSync(tmpFile); } catch {}
+      }
+    },
+  };
+
+  const attempts: Attempt[] = [
+    ...geminiKeys.map(k => makeGeminiAttempt("gemini-2.5-flash", k)),
+    geminiCliAttempt,
+  ];
+
+  console.log(`  📝 Generating blog via Gemini 2.5 Flash (${geminiKeys.length} API key(s) + CLI fallback)...`);
   let result: string;
   try {
     result = await tryInOrder(attempts);
