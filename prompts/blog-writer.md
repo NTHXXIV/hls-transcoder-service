@@ -21,7 +21,7 @@ thông tin ngoài transcript. Không bịa số liệu.**
 ### 1. Frontmatter (bắt buộc đủ các field)
 ```yaml
 ---
-title: 'Tiêu đề ngắn gọn, hấp dẫn, dưới 70 ký tự'
+title: 'Tiêu đề bài viết — xem hướng dẫn bên dưới'
 date: YYYY-MM-DD
 description: '1-2 câu tóm tắt giá trị bài viết — lý do người đọc nên đọc'
 thumbnail: '[copy nguyên văn giá trị thumbnail từ input — URL tuyệt đối hoặc relative path, không tự ý thay đổi]'
@@ -32,6 +32,21 @@ author: Alex
 
 > **Bắt buộc:** `title` và `description` LUÔN wrap trong dấu nháy đơn `'...'` — không có ngoại lệ.
 > Lý do: YAML parser crash khi gặp `:`, `?`, `!`, `"`, `—` nằm ngoài quotes.
+
+**Cách viết title:**
+
+Công thức ưu tiên: `[Tên công ty/Ticker] + [chủ đề chính] + [khung thời gian nếu có]`
+
+Ví dụ tốt:
+- `HPG Q1 2026: Lợi nhuận phục hồi nhờ giá thép tăng`
+- `Tại sao VNM liên tục mất thị phần?`
+- `FPT 2025: Ba mảng tăng trưởng cần theo dõi`
+- `DCA vào ETF: Chiến lược phù hợp khi nào?`
+- `Báo cáo tài chính VIC 2025: Những con số cần chú ý`
+
+Tránh: kiểu tiêu đề video ("Hé lộ...", "Bí mật...", "Đừng bỏ lỡ...", "Sự thật về..."), câu hỏi tu từ không có câu trả lời trong bài, title chung chung không có từ khóa cụ thể.
+
+Tối đa **65 ký tự**.
 
 ### 2. Đoạn mở (không có heading)
 
@@ -140,5 +155,5 @@ Transcript được tạo bằng AI speech-to-text nên có thể còn sót lỗ
 5. **Độ dài bài** — transcript dài thì bài phải dài tương ứng. Mỗi luận điểm trong transcript cần được triển khai thành 1 section riêng với ví dụ, số liệu, và phân tích — không rút gọn hay bỏ qua. Bài tối thiểu 800 từ, transcript dài thì 1200–1500 từ.
 6. **Độ sâu nội dung** — mỗi section phải có phân tích, không chỉ liệt kê. Dùng table khi có số liệu so sánh nhiều kỳ, blockquote cho insight quan trọng nhất
 7. **Ảnh nội dung** — chỉ chèn ảnh nếu ảnh đó thực sự minh họa đoạn văn đang nói
-8. **Không chèn sponsor/quảng cáo vào giữa bài** — nội dung Stag chỉ nằm ở CTA cuối bài
+8. **Không đề cập Stag trong nội dung bài** — tuyệt đối không nhắc đến Stag, sứ mệnh Stag, hay bất kỳ dịch vụ/khóa học của Stag ở bất cứ đâu trong phần nội dung. Stag CHỈ xuất hiện ở 2 vị trí cố định cuối bài: câu hỏi tương tác (link Facebook group) và CTA khóa học — đã được viết sẵn trong template, không cần thêm.
 9. **Không dùng ngôn ngữ/câu mở kiểu video** — tuyệt đối không bắt đầu bằng "Chào mừng", "Xin chào mọi người", "Video hôm nay", "kênh của mình", "See you later", "Đăng ký kênh", "like và subscribe"... Bài viết blog phải mở đầu bằng nội dung/vấn đề, không phải lời chào kiểu YouTube.

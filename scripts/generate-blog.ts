@@ -154,7 +154,6 @@ function getValidRows(rows: Record<string, string>[]): Record<string, string>[] 
 
 interface StateEntry {
   slug: string;
-  title_hash: string;
   youtube_hash: string;
   thumbnail_hash: string;
   processed_at: string;
@@ -174,9 +173,6 @@ async function saveState(state: Record<string, StateEntry>): Promise<void> {
 
 function md5(s: string): string {
   return createHash("md5").update(s).digest("hex").slice(0, 10);
-}
-function hashTitle(row: Record<string, string>): string {
-  return md5(row["Video_title"] ?? "");
 }
 function hashYoutube(row: Record<string, string>): string {
   return md5(row["Published_link"]?.trim() ?? "");
@@ -229,12 +225,6 @@ function buildEmbed(publishedLink: string): EmbedResult {
   const ttId = extractTikTokId(publishedLink);
   if (ttId) return { html: tiktokEmbed(ttId, publishedLink), type: "tiktok" };
   return null;
-}
-
-async function updateTitle(mdPath: string, newTitle: string): Promise<void> {
-  let md = await fs.readFile(mdPath, "utf-8");
-  md = md.replace(/^(title:\s*).*$/m, `$1'${newTitle.replace(/'/g, "\\'")}'`);
-  await fs.writeFile(mdPath, md, "utf-8");
 }
 
 async function updateYouTube(mdPath: string, youtubeUrl: string): Promise<void> {
@@ -320,6 +310,15 @@ function parseTranscript(transcript: string): ParsedTranscript {
   return { segments, resources };
 }
 
+// ─── Title extraction from model output ──────────────────────────────────────
+
+function extractTitleFromBlog(blog: string): string | null {
+  // Handles: title: 'foo', title: "foo", title: foo
+  const m = blog.match(/^title:\s*(?:'([^']*)'|"([^"]*)"|(.+?))\s*$/m);
+  if (!m) return null;
+  return (m[1] ?? m[2] ?? m[3] ?? "").trim() || null;
+}
+
 // ─── Blog Generation ──────────────────────────────────────────────────────────
 
 // ─── Cooldown / retry abstraction ────────────────────────────────────────────
@@ -372,14 +371,12 @@ async function generateBlog(
   row: Record<string, string>,
   cleanedTranscript: string,
   resources: string,
-  slug: string,
   thumbnailUrl: string | null,
   outline?: { summary: string; keywords: string[] },
 ): Promise<string> {
   const promptTemplate = await fs.readFile(BLOG_PROMPT_PATH, "utf-8");
   const promptBody = promptTemplate.replace(/^---[\s\S]*?---\n/, "").trim();
 
-  const title   = row["Video_title"]!;
   const airDate = parseAirDate(row["Ngày air"]?.trim() || row["Ngày source raw được gửi"]?.trim() || "");
   const pubUrl  = row["Published_link"]?.trim() ?? "";
   const embed   = pubUrl ? buildEmbed(pubUrl) : null;
@@ -401,7 +398,6 @@ Từ khóa chính: ${outline.keywords.join(", ")}
 
 ## Input cho bài này
 
-**title** (copy nguyên văn vào frontmatter, KHÔNG rút gọn hay đặt lại): ${title}
 **date**: ${airDate}
 **thumbnail**: ${thumbnailUrl ? thumbnailUrl : "không có — bỏ qua field thumbnail"}
 **video embed**: ${embed ? `chèn sau đoạn mở, trước heading đầu tiên:\n${embed.html}` : "không có"}
@@ -458,7 +454,6 @@ Viết file index.md:`;
 
 interface ChangeFlags {
   isNew: boolean;
-  titleChanged: boolean;
   youtubeChanged: boolean;
   thumbnailChanged: boolean;
 }
@@ -469,43 +464,32 @@ async function processRow(
   flags: ChangeFlags,
 ): Promise<void> {
   const videoCode = row["Video_code"]!;
-  const title     = row["Video_title"]!;
 
   console.log(`\n${"─".repeat(60)}`);
   const tag = flags.isNew ? "🆕 NEW" : "🔧 UPDATE";
-  console.log(`${tag} [${videoCode}] ${title}`);
+  console.log(`${tag} [${videoCode}]`);
   console.log(`${"─".repeat(60)}`);
-
-  const slug = state[videoCode]?.slug ?? await uniqueSlug(slugify(title));
-  console.log(`   🔗 Slug: ${slug}`);
-
-  const contentDir = path.join(CONTENT_BAI_VIET, slug);
-  // Note: don't mkdir here — create only just before writing to avoid leaving
-  // empty dirs on failure that cause slug collisions on retry (uniqueSlug sees them)
-  const mdPath = path.join(contentDir, "index.md");
-
-  // ── Thumbnail ──────────────────────────────────────────────────────────────
-  let thumbnailUrl: string | null = null;
-  if (flags.thumbnailChanged) {
-    const thumbSrc = row["Thumbnail"]?.trim() ?? "";
-    if (thumbSrc) {
-      process.stdout.write(`\n📷 Uploading thumbnail...`);
-      thumbnailUrl = await downloadAndUploadThumbnail(thumbSrc, slug);
-      console.log(thumbnailUrl ? ` ✅` : " ❌ failed");
-      if (thumbnailUrl && !flags.isNew) {
-        let md = await fs.readFile(mdPath, "utf-8");
-        md = md.replace(/^(thumbnail:\s*).*$/m, `$1'${thumbnailUrl}'`);
-        await fs.writeFile(mdPath, md, "utf-8");
-      }
-    }
-  }
 
   // ── Non-AI updates (existing posts only) ───────────────────────────────────
   if (!flags.isNew) {
-    if (flags.titleChanged) {
-      await updateTitle(mdPath, title);
-      console.log(`\n✏️  Title updated`);
+    const slug = state[videoCode]!.slug;
+    console.log(`   🔗 Slug: ${slug}`);
+    const mdPath = path.join(CONTENT_BAI_VIET, slug, "index.md");
+
+    if (flags.thumbnailChanged) {
+      const thumbSrc = row["Thumbnail"]?.trim() ?? "";
+      if (thumbSrc) {
+        process.stdout.write(`\n📷 Uploading thumbnail...`);
+        const thumbnailUrl = await downloadAndUploadThumbnail(thumbSrc, slug);
+        console.log(thumbnailUrl ? ` ✅` : " ❌ failed");
+        if (thumbnailUrl) {
+          let md = await fs.readFile(mdPath, "utf-8");
+          md = md.replace(/^(thumbnail:\s*).*$/m, `$1'${thumbnailUrl}'`);
+          await fs.writeFile(mdPath, md, "utf-8");
+        }
+      }
     }
+
     if (flags.youtubeChanged) {
       const ytUrl = row["Published_link"]?.trim() ?? "";
       if (ytUrl) {
@@ -513,9 +497,9 @@ async function processRow(
         console.log(`\n▶️  YouTube embed updated`);
       }
     }
+
     state[videoCode] = {
       ...state[videoCode]!,
-      title_hash: hashTitle(row),
       youtube_hash: hashYoutube(row),
       thumbnail_hash: hashThumbnail(row),
       processed_at: new Date().toISOString(),
@@ -535,25 +519,41 @@ async function processRow(
     console.log(`   📋 Outline: ${keywords.slice(0, 5).join(", ")}...`);
   }
 
+  // Generate blog first (no thumbnail yet — slug not known until model writes title)
   console.log(`\n✍️  Generating blog...`);
-  let blog = await generateBlog(row, cleanedFullText, resources, slug, thumbnailUrl, { summary, keywords });
+  let blog = await generateBlog(row, cleanedFullText, resources, null, { summary, keywords });
   blog = blog.replace(/^```(?:markdown|yaml|md)?\n([\s\S]*?)```\s*$/m, "$1").trim();
   const fmStart = blog.indexOf("---");
   if (fmStart > 0) blog = blog.slice(fmStart);
 
-  // Post-process: force correct title and thumbnail regardless of what model wrote
-  blog = blog.replace(/^(title:\s*).*$/m, `$1'${title.replace(/'/g, "\\'")}'`);
+  // Extract model-written title → derive slug
+  const modelTitle = extractTitleFromBlog(blog);
+  if (!modelTitle) throw new Error(`[${videoCode}] Model did not generate a title in frontmatter`);
+  const slug = await uniqueSlug(slugify(modelTitle));
+  console.log(`   🔗 Slug: ${slug} (từ title: "${modelTitle}")`);
+
+  // Upload thumbnail now that we have a slug
+  let thumbnailUrl: string | null = null;
+  const thumbSrc = row["Thumbnail"]?.trim() ?? "";
+  if (thumbSrc) {
+    process.stdout.write(`\n📷 Uploading thumbnail...`);
+    thumbnailUrl = await downloadAndUploadThumbnail(thumbSrc, slug);
+    console.log(thumbnailUrl ? ` ✅` : " ❌ failed");
+  }
   if (thumbnailUrl) {
     blog = blog.replace(/^(thumbnail:\s*).*$/m, `$1'${thumbnailUrl}'`);
   }
 
+  // Note: don't mkdir until just before writing to avoid empty dirs on failure
+  // causing slug collisions on retry (uniqueSlug sees existing dirs)
+  const contentDir = path.join(CONTENT_BAI_VIET, slug);
+  const mdPath = path.join(contentDir, "index.md");
   await fs.mkdir(contentDir, { recursive: true });
   await fs.writeFile(mdPath, blog, "utf-8");
   console.log(`   ✅ content/blog/bai-viet/${slug}/index.md`);
 
   state[videoCode] = {
     slug,
-    title_hash: hashTitle(row),
     youtube_hash: hashYoutube(row),
     thumbnail_hash: hashThumbnail(row),
     processed_at: new Date().toISOString(),
@@ -609,24 +609,29 @@ async function main() {
     rowsToProcess = [validRows[idx]!];
   }
 
-  // ── Migrate old state format (hash → title_hash + youtube_hash) ─────────────
+  // ── Migrate old state format (hash / title_hash → youtube_hash) ─────────────
   let migrated = 0;
   const csvMap = Object.fromEntries(validRows.map(r => [r["Video_code"]!, r]));
   for (const [code, entry] of Object.entries(state)) {
-    if (!("title_hash" in entry)) {
+    let dirty = false;
+    if (!("youtube_hash" in entry)) {
       const row = csvMap[code];
-      // Check if youtube link is already embedded in the markdown
-      const mdPath = path.join(CONTENT_BAI_VIET, entry.slug, "index.md");
+      const mdPath = path.join(CONTENT_BAI_VIET, (entry as any).slug, "index.md");
       let hasIframe = false;
       try { hasIframe = /<iframe/i.test(await fs.readFile(mdPath, "utf-8")); } catch {}
       const ytUrl = row?.["Published_link"]?.trim() ?? "";
       // Force youtube update if link exists but not yet in markdown
-      (entry as any).title_hash   = row ? hashTitle(row) : "";
       (entry as any).youtube_hash = (ytUrl && !hasIframe) ? "" : (row ? hashYoutube(row) : "");
       (entry as any).thumbnail_hash ??= "";
       delete (entry as any).hash;
-      migrated++;
+      dirty = true;
     }
+    // Clean up stale title_hash
+    if ("title_hash" in entry) {
+      delete (entry as any).title_hash;
+      dirty = true;
+    }
+    if (dirty) migrated++;
   }
   if (migrated > 0) {
     await saveState(state);
@@ -643,19 +648,17 @@ async function main() {
 
     if (!entry) {
       console.log(`\n🆕 New [${code}]`);
-      toRun.push({ row, flags: { isNew: true, titleChanged: false, youtubeChanged: false, thumbnailChanged: true } });
+      toRun.push({ row, flags: { isNew: true, youtubeChanged: false, thumbnailChanged: true } });
       continue;
     }
 
     const flags: ChangeFlags = {
       isNew: false,
-      titleChanged:     entry.title_hash     !== hashTitle(row),
       youtubeChanged:   entry.youtube_hash   !== hashYoutube(row),
       thumbnailChanged: entry.thumbnail_hash !== hashThumbnail(row),
     };
 
     const changes = [
-      flags.titleChanged     && "title",
       flags.youtubeChanged   && "youtube",
       flags.thumbnailChanged && "thumbnail",
     ].filter(Boolean).join(", ");
