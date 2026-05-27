@@ -34,6 +34,7 @@ jobs:
     if: github.event_name == 'repository_dispatch'
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
 
