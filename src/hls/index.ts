@@ -156,8 +156,14 @@ export async function runHlsTranscode() {
   const PRIVATE_KEY = process.env.TRANSCODER_PRIVATE_KEY;
 
   const SOURCE_URL = payload.source_url;
-  const LESSON_ID =
-    typeof payload.lesson_id === "string" ? payload.lesson_id.trim() : "";
+  // resource_id is the generic entity identifier (lesson, community video, etc.)
+  // lesson_id accepted as backward-compat alias
+  const RESOURCE_ID: string =
+    typeof payload.resource_id === "string" && payload.resource_id.trim()
+      ? payload.resource_id.trim()
+      : typeof payload.lesson_id === "string"
+        ? payload.lesson_id.trim()
+        : "";
   const CALLBACK_CLIENT_ID = payload.callback_client_id;
   const TARGET_R2_CONFIG = payload.target_r2_config;
   const VARIANTS_CSV = payload.variants || "480p,720p";
@@ -166,18 +172,18 @@ export async function runHlsTranscode() {
   const SOURCE_VERSION = payload.source_version;
   const JOB_ID = payload.job_id;
 
-  if (!LESSON_ID) {
-    console.error("❌ Error: Missing or invalid payload.lesson_id");
+  if (!RESOURCE_ID) {
+    console.error("❌ Error: Missing or invalid payload.resource_id");
     process.exit(1);
   }
 
   if (
     !TARGET_R2_CONFIG.prefix ||
     TARGET_R2_CONFIG.prefix === "/" ||
-    !TARGET_R2_CONFIG.prefix.includes(LESSON_ID)
+    !TARGET_R2_CONFIG.prefix.includes(RESOURCE_ID)
   ) {
     console.error(
-      "❌ Error: TARGET_R2_CONFIG.prefix is invalid or does not contain lesson_id.",
+      "❌ Error: TARGET_R2_CONFIG.prefix is invalid or does not contain resource_id.",
     );
     process.exit(1);
   }
@@ -244,7 +250,7 @@ if (CALLBACK_URL) {
   await sendCallback(
     CALLBACK_URL,
     {
-      lessonId: LESSON_ID,
+      resourceId: RESOURCE_ID,
       jobId: JOB_ID,
       sourceVersion: SOURCE_VERSION,
       status: "processing",
@@ -272,7 +278,7 @@ if (CALLBACK_URL) {
     );
 
     const durationSeconds = await getVideoDuration(localSource);
-    console.log(`📏 [${LESSON_ID}] Video duration: ${durationSeconds}s`);
+    console.log(`📏 [${RESOURCE_ID}] Video duration: ${durationSeconds}s`);
 
     await createHlsRenditions(
       localSource,
@@ -324,7 +330,7 @@ if (CALLBACK_URL) {
     const hlsVersion = hlsVersionMatch ? hlsVersionMatch[1] : "v2";
 
     const readyPayload: Record<string, any> = {
-      lessonId: LESSON_ID,
+      resourceId: RESOURCE_ID,
       jobId: JOB_ID,
       sourceVersion: SOURCE_VERSION,
       status: "ready",
@@ -346,7 +352,7 @@ if (CALLBACK_URL) {
       await sendCallback(
         CALLBACK_URL,
         {
-          lessonId: LESSON_ID,
+          resourceId: RESOURCE_ID,
           jobId: JOB_ID,
           sourceVersion: SOURCE_VERSION,
           status: "failed",
