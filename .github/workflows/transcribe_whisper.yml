@@ -13,9 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Mask Sensitive Payload
+      - name: Mask Sensitive Fields
         run: |
-          echo "::add-mask::${{ toJson(github.event.client_payload) }}"
+          echo "::add-mask::${{ github.event.client_payload.callback_url }}"
+          echo "::add-mask::${{ github.event.client_payload.callback_client_id }}"
 
       - uses: actions/setup-node@v4
         with:
