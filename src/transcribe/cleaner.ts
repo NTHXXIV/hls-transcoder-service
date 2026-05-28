@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import Groq from "groq-sdk";
 
@@ -58,7 +62,6 @@ const GEMINI_MODELS = [
 
 // State để nhớ model nào đang chạy tốt
 let lastSuccessfulGroqModelIndex = 0;
-let lastSuccessfulGeminiModelIndex = 0;
 
 function getGeminiKeys(): string[] {
   return [
@@ -68,49 +71,66 @@ function getGeminiKeys(): string[] {
   ].filter(Boolean) as string[];
 }
 
+// Session-level cooldown per "model:key" — phân biệt daily quota vs RPM
+const geminiCooldowns = new Map<string, number>();
+const GEMINI_RPM_COOLDOWN_MS  = 2 * 60 * 1000;      // 2 phút
+const GEMINI_DAILY_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4 giờ (daily quota sẽ không reset sớm hơn)
+
+function isGeminiCoolingDown(id: string): boolean {
+  const t = geminiCooldowns.get(id);
+  return t !== undefined && Date.now() < t;
+}
+
+function markGeminiCooldown(id: string, error: any) {
+  const msg = (error.message ?? "").toLowerCase();
+  const isDaily = msg.includes("daily") || msg.includes("quota") || msg.includes("free_tier") || msg.includes("limit: 0");
+  const ms = isDaily ? GEMINI_DAILY_COOLDOWN_MS : GEMINI_RPM_COOLDOWN_MS;
+  geminiCooldowns.set(id, Date.now() + ms);
+  console.warn(`  🧊 Gemini ${id} cooling down ${isDaily ? "4h (daily quota)" : "2min (RPM)"}`);
+}
+
 async function cleanWithGemini(segments: TranscriptSegment[]): Promise<any> {
   const keys = getGeminiKeys();
   if (keys.length === 0) throw new Error("No Gemini API Key");
 
   let lastError: any = null;
 
-  // Thử từ model thành công lần trước, mỗi model × mỗi key
-  for (let i = 0; i < GEMINI_MODELS.length; i++) {
-    const idx = (lastSuccessfulGeminiModelIndex + i) % GEMINI_MODELS.length;
-    const modelName = GEMINI_MODELS[idx];
-
+  for (const modelName of GEMINI_MODELS) {
     for (const apiKey of keys) {
-    try {
-      console.log(`    💎 Trying Gemini model: ${modelName}...`);
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: modelName });
-
-      const result = await model.generateContent({
-        contents: [{ role: "user", parts: [{ text: PROMPT_TEMPLATE(JSON.stringify(segments)) }] }],
-        generationConfig: {
-          responseMimeType: "application/json",
-          temperature: 0.1,
-        }
-      });
-
-      const text = result.response.text();
-      try {
-        const parsed = JSON.parse(text);
-        lastSuccessfulGeminiModelIndex = idx;
-        return parsed;
-      } catch (e) {
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          lastSuccessfulGeminiModelIndex = idx;
-          return JSON.parse(jsonMatch[0]);
-        }
-        throw new Error("Invalid AI Response: Could not parse JSON");
+      const id = `${modelName}:${apiKey.slice(-6)}`;
+      if (isGeminiCoolingDown(id)) {
+        console.log(`  ⏭ Skip Gemini ${modelName} key …${apiKey.slice(-6)} (cooling down)`);
+        continue;
       }
-    } catch (error: any) {
-      console.warn(`    ⚠️ Gemini model ${modelName} failed: ${error.message?.slice(0, 120)}`);
-      lastError = error;
+      try {
+        console.log(`    💎 Trying Gemini model: ${modelName}...`);
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: modelName });
+
+        const result = await model.generateContent({
+          contents: [{ role: "user", parts: [{ text: PROMPT_TEMPLATE(JSON.stringify(segments)) }] }],
+          generationConfig: {
+            responseMimeType: "application/json",
+            temperature: 0.1,
+          }
+        });
+
+        const text = result.response.text();
+        try {
+          return JSON.parse(text);
+        } catch (e) {
+          const jsonMatch = text.match(/\{[\s\S]*\}/);
+          if (jsonMatch) return JSON.parse(jsonMatch[0]);
+          throw new Error("Invalid AI Response: Could not parse JSON");
+        }
+      } catch (error: any) {
+        console.warn(`    ⚠️ Gemini model ${modelName} failed: ${error.message?.slice(0, 120)}`);
+        lastError = error;
+        if (error.status === 429 || error.message?.includes("429")) {
+          markGeminiCooldown(id, error);
+        }
+      }
     }
-    } // end key loop
   }
   throw lastError;
 }
@@ -180,30 +200,6 @@ async function cleanWithGroq(segments: TranscriptSegment[]): Promise<any> {
   throw lastError;
 }
 
-async function cleanWithDeepSeek(segments: TranscriptSegment[]): Promise<any> {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) throw new Error("No DeepSeek API Key");
-
-  console.log(`    🤖 Trying DeepSeek V3...`);
-  const res = await fetch("https://api.deepseek.com/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: "deepseek-chat",
-      messages: [{ role: "user", content: PROMPT_TEMPLATE(JSON.stringify(segments)) }],
-      response_format: { type: "json_object" },
-      temperature: 0.1,
-    }),
-  });
-  const json = await res.json() as any;
-  if (!res.ok) throw Object.assign(new Error(JSON.stringify(json)), { status: res.status });
-  const content = json.choices[0]?.message?.content;
-  if (!content) throw new Error("Empty response from DeepSeek");
-  return JSON.parse(content);
-}
 
 function chunkSegments(segments: TranscriptSegment[], chunkSize: number = 30): TranscriptSegment[][] {
   const chunks: TranscriptSegment[][] = [];
@@ -213,18 +209,64 @@ function chunkSegments(segments: TranscriptSegment[], chunkSize: number = 30): T
   return chunks;
 }
 
+// ─── Chunk cache (temp file) — resume khi process bị crash giữa chừng ────────
+
+function chunkCacheKey(segments: TranscriptSegment[]): string {
+  const sample = segments.slice(0, 3).map(s => `${s.start}:${s.text.slice(0, 20)}`).join("|");
+  return createHash("md5").update(sample).digest("hex").slice(0, 12);
+}
+
+function chunkCachePath(key: string): string {
+  return path.join(os.tmpdir(), `clean-cache-${key}.json`);
+}
+
+async function loadChunkCache(key: string): Promise<Record<number, any>> {
+  try {
+    return JSON.parse(await fs.readFile(chunkCachePath(key), "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+async function saveChunkCache(key: string, cache: Record<number, any>): Promise<void> {
+  await fs.writeFile(chunkCachePath(key), JSON.stringify(cache));
+}
+
+async function clearChunkCache(key: string): Promise<void> {
+  try { await fs.unlink(chunkCachePath(key)); } catch {}
+}
+
 export async function cleanTranscript(segments: TranscriptSegment[]) {
   const chunks = chunkSegments(segments, 30);
   const allCleanedSegments: TranscriptSegment[] = [];
   const allSummaries: string[] = [];
   const allKeywords = new Set<string>();
 
-  console.log(`📦 Processing transcript in ${chunks.length} chunks...`);
+  const cacheKey = chunkCacheKey(segments);
+  const cache = await loadChunkCache(cacheKey);
+  const cachedCount = Object.keys(cache).length;
+  if (cachedCount > 0) {
+    console.log(`📦 Processing transcript in ${chunks.length} chunks... (${cachedCount} cached from previous run)`);
+  } else {
+    console.log(`📦 Processing transcript in ${chunks.length} chunks...`);
+  }
 
   for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
+    const chunk = chunks[i]!;
+
+    // Resume từ cache nếu chunk này đã được xử lý
+    if (cache[i]) {
+      const cached = cache[i];
+      console.log(`⏭ Chunk ${i + 1}/${chunks.length} (from cache)`);
+      if (cached.cleanedSegments) allCleanedSegments.push(...cached.cleanedSegments);
+      else allCleanedSegments.push(...chunk);
+      if (cached.summary) allSummaries.push(cached.summary);
+      if (Array.isArray(cached.keywords)) cached.keywords.forEach((k: string) => allKeywords.add(k.toLowerCase()));
+      continue;
+    }
+
     console.log(`⏳ Processing chunk ${i + 1}/${chunks.length}...`);
-    
+
     let result: any = null;
     let chunkRetries = 2;
 
@@ -236,17 +278,9 @@ export async function cleanTranscript(segments: TranscriptSegment[]) {
         } catch (groqError: any) {
           console.warn(`  ⚠️ Groq failed for chunk ${i+1}.`);
 
-          // 2. DeepSeek V3
-          try {
-            console.log(`  🔄 Switching to DeepSeek for chunk ${i+1}...`);
-            result = await cleanWithDeepSeek(chunk);
-          } catch (deepseekError: any) {
-            console.warn(`  ⚠️ DeepSeek failed for chunk ${i+1}.`);
-
-            // 3. Gemini
-            console.log(`  🔄 Switching to Gemini for chunk ${i+1}...`);
-            result = await cleanWithGemini(chunk);
-          }
+          // 2. Gemini
+          console.log(`  🔄 Switching to Gemini for chunk ${i+1}...`);
+          result = await cleanWithGemini(chunk);
         }
       } catch (error: any) {
         console.error(`  ❌ All AI providers failed for chunk ${i+1}.`);
@@ -255,20 +289,22 @@ export async function cleanTranscript(segments: TranscriptSegment[]) {
           await sleep(30000);
           chunkRetries--;
         } else {
-          // THROW ERROR: Không "cứu vãn" bằng bản thô nữa, báo lỗi để Job fail chính thức
-          throw new Error(`CLEAN_JOB_FAILED: AI services are unavailable or quota exceeded after multiple retries (Chunk ${i+1}/${chunks.length}). Last error: ${error.message}`);
+          throw new Error(`CLEAN_JOB_FAILED: AI services unavailable after retries (Chunk ${i+1}/${chunks.length}). Rerun to resume from chunk ${i+1}. Last error: ${error.message?.slice(0, 200)}`);
         }
       }
     }
+
+    // Lưu chunk vào cache ngay sau khi xử lý xong
+    cache[i] = result;
+    await saveChunkCache(cacheKey, cache);
 
     // Gộp kết quả
     if (result.cleanedSegments) {
       allCleanedSegments.push(...result.cleanedSegments);
     } else {
-      // Trường hợp AI trả về JSON nhưng thiếu field (hiếm gặp với rotate model)
       allCleanedSegments.push(...chunk);
     }
-    
+
     if (result.summary) allSummaries.push(result.summary);
     if (Array.isArray(result.keywords)) {
       result.keywords.forEach((k: string) => allKeywords.add(k.toLowerCase()));
@@ -277,6 +313,9 @@ export async function cleanTranscript(segments: TranscriptSegment[]) {
     // Short pause between chunks to avoid burst TPM
     if (i < chunks.length - 1) await sleep(3000);
   }
+
+  // Xóa cache sau khi hoàn thành
+  await clearChunkCache(cacheKey);
 
   const finalFullText = allCleanedSegments.map(s => s.text).join(" ");
   const finalSummary = allSummaries.join(" ");

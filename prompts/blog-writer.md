@@ -105,16 +105,9 @@ Tối đa **65 ký tự**.
 ## Kết Luận
 
 [2–3 đoạn tóm tắt luận điểm chính và câu hỏi mở]
-
----
-
-_[Câu hỏi tương tác liên quan đến nội dung bài — dẫn người đọc vào thảo luận tại cộng đồng Stag trên Facebook: [Stag - Giáo dục tài chính và đầu tư bền vững](https://www.facebook.com/groups/953803242188268)]_
-
----
-
-> **Muốn nâng cao kỹ năng tài chính và đầu tư?**
-> [Stag](https://stag.vn/khoa-hoc) cung cấp các khóa học phân tích báo cáo tài chính và đầu tư quỹ mở/ETF — được truyền tải đơn giản, dễ hiểu, không cần nền tảng tài chính chuyên sâu.
 ```
+
+> **Lưu ý:** KHÔNG thêm phần cộng đồng Facebook hay CTA khóa học — 2 phần này đã được render tự động ở trang web, không cần viết vào nội dung bài.
 
 ---
 
@@ -152,5 +145,5 @@ Transcript được tạo bằng AI speech-to-text nên có thể còn sót lỗ
 5. **Độ dài bài** — transcript dài thì bài phải dài tương ứng. Mỗi luận điểm trong transcript cần được triển khai thành 1 section riêng với ví dụ, số liệu, và phân tích — không rút gọn hay bỏ qua. Bài tối thiểu 800 từ, transcript dài thì 1200–1500 từ.
 6. **Độ sâu nội dung** — mỗi section phải có phân tích, không chỉ liệt kê. Dùng table khi có số liệu so sánh nhiều kỳ, blockquote cho insight quan trọng nhất
 7. **Ảnh nội dung** — chỉ chèn ảnh nếu ảnh đó thực sự minh họa đoạn văn đang nói
-8. **Không đề cập Stag trong nội dung bài** — tuyệt đối không nhắc đến Stag, sứ mệnh Stag, hay bất kỳ dịch vụ/khóa học của Stag ở bất cứ đâu trong phần nội dung. Stag CHỈ xuất hiện ở 2 vị trí cố định cuối bài: câu hỏi tương tác (link Facebook group) và CTA khóa học — đã được viết sẵn trong template, không cần thêm.
+8. **Không đề cập Stag trong nội dung bài** — tuyệt đối không nhắc đến Stag, sứ mệnh Stag, hay bất kỳ dịch vụ/khóa học của Stag ở bất cứ đâu trong phần nội dung. Phần cộng đồng Facebook và CTA khóa học đã được render tự động ở trang web — không viết vào file.
 9. **Không dùng ngôn ngữ/câu mở kiểu video** — tuyệt đối không bắt đầu bằng "Chào mừng", "Xin chào mọi người", "Video hôm nay", "kênh của mình", "See you later", "Đăng ký kênh", "like và subscribe"... Bài viết blog phải mở đầu bằng nội dung/vấn đề, không phải lời chào kiểu YouTube.

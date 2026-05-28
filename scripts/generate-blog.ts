@@ -7,6 +7,7 @@
  *   --code <VIDEO_CODE>   Target specific video (default: first valid row)
  *   --row  <INDEX>        Target by row index
  *   --all                 Process all valid rows sequentially
+ *   --limit <N>           Stop after N new posts (AI-generated)
  *
  * Flow:
  *   1. Parse CSV → pick row(s), skip if no transcript / hard-skip / series
@@ -569,7 +570,11 @@ async function processRow(
     console.log(thumbnailUrl ? ` ✅` : " ❌ failed");
   }
   if (thumbnailUrl) {
-    blog = blog.replace(/^(thumbnail:\s*).*$/m, `$1'${thumbnailUrl}'`);
+    if (/^thumbnail:\s*/m.test(blog)) {
+      blog = blog.replace(/^(thumbnail:\s*).*$/m, `$1'${thumbnailUrl}'`);
+    } else {
+      blog = blog.replace(/^(date:\s*.+)$/m, `$1\nthumbnail: '${thumbnailUrl}'`);
+    }
   }
 
   // Note: don't mkdir until just before writing to avoid empty dirs on failure
@@ -605,6 +610,7 @@ async function main() {
     rowIndex: getFlag("--row") !== undefined ? parseInt(getFlag("--row")!) : undefined,
     csv:      getFlag("--csv"),
     state:    getFlag("--state"),
+    limit:    getFlag("--limit") !== undefined ? parseInt(getFlag("--limit")!) : undefined,
   };
 
   if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY not set");
@@ -614,6 +620,8 @@ async function main() {
     STATE_PATH = path.isAbsolute(opts.state)
       ? opts.state
       : path.join(STAGAPPS_ROOT, "content", opts.state);
+  } else if (opts.csv && /tiktok/i.test(opts.csv)) {
+    STATE_PATH = path.join(STAGAPPS_ROOT, "content/blog-state-tiktok.json");
   }
   console.log(`\n📁 State file: ${path.relative(STAGAPPS_ROOT, STATE_PATH)}`);
 
@@ -708,10 +716,18 @@ async function main() {
     return;
   }
 
+  let newCount = 0;
   for (let i = 0; i < toRun.length; i++) {
     const { row, flags } = toRun[i]!;
     if (opts.all) console.log(`\n[${i + 1}/${toRun.length}]`);
     await processRow(row, state, flags);
+    if (flags.isNew) {
+      newCount++;
+      if (opts.limit !== undefined && newCount >= opts.limit) {
+        console.log(`\n🛑 Reached limit of ${opts.limit} new posts.`);
+        break;
+      }
+    }
   }
 }
 
