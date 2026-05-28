@@ -23,9 +23,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * Validates the mandatory fields in the payload (Exported for Testing)
  */
 export function validatePayload(payload: any) {
-  const { lesson_id, source_url, target_r2_config } = payload;
-  if (!lesson_id || !source_url || !target_r2_config) {
-    throw new Error("Missing mandatory fields (lesson_id, source_url, target_r2_config)");
+  // resource_id is the generic entity identifier; lesson_id accepted as backward-compat alias
+  const resourceId = payload.resource_id || payload.lesson_id;
+  const { source_url, target_r2_config } = payload;
+  if (!resourceId || !source_url || !target_r2_config) {
+    throw new Error("Missing mandatory fields (resource_id, source_url, target_r2_config)");
   }
 }
 
@@ -53,7 +55,9 @@ export async function runTranscriptionJob() {
 
   if (!payloadPath) process.exit(1);
   const payload = JSON.parse(readFileSync(payloadPath, "utf-8"));
-  const jobId = payload.job_id || payload.lesson_id;
+  // resource_id is the generic entity identifier; lesson_id accepted as backward-compat alias
+  const resourceId = payload.resource_id || payload.lesson_id;
+  const jobId = payload.job_id || resourceId;
   const workingDir = path.join(os.tmpdir(), `transcribe-${jobId}-${Date.now()}`);
 
   try {
@@ -67,7 +71,7 @@ export async function runTranscriptionJob() {
       const localAudio = path.join(workingDir, "audio.wav");
       const resultPath = path.join(workingDir, "raw.json");
 
-      await sendCallback(payload.callback_url, { lessonId: payload.lesson_id, jobId: payload.job_id, status: "whisper_processing" }, payload.callback_client_id);
+      await sendCallback(payload.callback_url, { resourceId, jobId: payload.job_id, status: "whisper_processing" }, payload.callback_client_id);
 
       const response = await fetch(payload.source_url);
       await pipeline(Readable.fromWeb(response.body! as any), createWriteStream(localVideo));
@@ -83,7 +87,7 @@ export async function runTranscriptionJob() {
       });
 
       const finalResult = {
-        jobId: payload.job_id, lessonId: payload.lesson_id,
+        jobId: payload.job_id, resourceId,
         metadata: { title: payload.title, durationSeconds, model: payload.model_size, isCleaned: false },
         fullText: whisperResult.full_text,
         segments: whisperResult.segments
@@ -92,7 +96,7 @@ export async function runTranscriptionJob() {
 
       const transcriptUrl = await uploadToR2(payload, resultPath);
       await sendCallback(payload.callback_url, {
-        lessonId: payload.lesson_id, jobId: payload.job_id, status: "whisper_success",
+        resourceId, jobId: payload.job_id, status: "whisper_success",
         transcriptUrl, fullText: finalResult.fullText, segments: finalResult.segments, metadata: finalResult.metadata
       }, payload.callback_client_id);
     }
@@ -102,14 +106,14 @@ export async function runTranscriptionJob() {
       console.log(`✨ Running Clean: ${jobId}`);
       if (!payload.raw) throw new Error("Missing 'raw' data");
 
-      await sendCallback(payload.callback_url, { lessonId: payload.lesson_id, jobId: payload.job_id, status: "clean_processing" }, payload.callback_client_id);
+      await sendCallback(payload.callback_url, { resourceId, jobId: payload.job_id, status: "clean_processing" }, payload.callback_client_id);
 
       const { cleanedFullText, cleanedSegments, summary, keywords } = await cleanTranscript(payload.raw.segments);
       const finalSegments = cleanedSegments.filter((s: any) => s.text && s.text.trim().length > 0);
       const resultPath = path.join(workingDir, "cleaned.json");
 
       const finalResult = {
-        jobId: payload.job_id, lessonId: payload.lesson_id,
+        jobId: payload.job_id, resourceId,
         metadata: { title: payload.title, durationSeconds: payload.raw.duration_seconds, isCleaned: true, summary, keywords },
         fullText: cleanedFullText,
         rawFullText: payload.raw.full_text,
@@ -121,7 +125,7 @@ export async function runTranscriptionJob() {
       const transcriptUrl = await uploadToR2(payload, resultPath);
 
       await sendCallback(payload.callback_url, {
-        lessonId: payload.lesson_id, jobId: payload.job_id, status: "clean_success",
+        resourceId, jobId: payload.job_id, status: "clean_success",
         transcriptUrl, fullText: finalResult.fullText, segments: finalResult.segments, metadata: finalResult.metadata
       }, payload.callback_client_id);
     }
@@ -129,7 +133,7 @@ export async function runTranscriptionJob() {
   } catch (error: any) {
     console.error(`❌ Error: ${error.message}`);
     const status = mode === "--whisper" ? "whisper_failed" : "clean_failed";
-    await sendCallback(payload.callback_url, { lessonId: payload.lesson_id, jobId: payload.job_id, status, error: error.message }, payload.callback_client_id);
+    await sendCallback(payload.callback_url, { resourceId, jobId: payload.job_id, status, error: error.message }, payload.callback_client_id);
     process.exit(1);
   } finally {
     await fs.rm(workingDir, { recursive: true, force: true }).catch(() => {});
