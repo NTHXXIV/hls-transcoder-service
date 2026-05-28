@@ -104,21 +104,29 @@ export async function runTranscriptionJob() {
     // --- MODE: CLEAN ---
     if (mode === "--clean") {
       console.log(`✨ Running Clean: ${jobId}`);
-      if (!payload.raw) throw new Error("Missing 'raw' data");
+      if (!payload.raw && !payload.raw_url) throw new Error("Missing 'raw' data");
+
+      let raw = payload.raw;
+      if (!raw && payload.raw_url) {
+        console.log(`📥 Fetching raw transcript from: ${payload.raw_url}`);
+        const rawResp = await fetch(payload.raw_url);
+        if (!rawResp.ok) throw new Error(`Failed to fetch raw transcript (${rawResp.status})`);
+        raw = await rawResp.json();
+      }
 
       await sendCallback(payload.callback_url, { resourceId, jobId: payload.job_id, status: "clean_processing" }, payload.callback_client_id);
 
-      const { cleanedFullText, cleanedSegments, summary, keywords } = await cleanTranscript(payload.raw.segments);
+      const { cleanedFullText, cleanedSegments, summary, keywords } = await cleanTranscript(raw.segments);
       const finalSegments = cleanedSegments.filter((s: any) => s.text && s.text.trim().length > 0);
       const resultPath = path.join(workingDir, "cleaned.json");
 
       const finalResult = {
         jobId: payload.job_id, resourceId,
-        metadata: { title: payload.title, durationSeconds: payload.raw.duration_seconds, isCleaned: true, summary, keywords },
+        metadata: { title: payload.title, durationSeconds: raw.duration_seconds, isCleaned: true, summary, keywords },
         fullText: cleanedFullText,
-        rawFullText: payload.raw.full_text,
+        rawFullText: raw.full_text,
         segments: finalSegments,
-        rawSegments: payload.raw.segments
+        rawSegments: raw.segments
       };
 
       await fs.writeFile(resultPath, JSON.stringify(finalResult, null, 2));
