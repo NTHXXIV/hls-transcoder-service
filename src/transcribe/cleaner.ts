@@ -74,7 +74,7 @@ function getGeminiKeys(): string[] {
 // Session-level cooldown per "model:key" — phân biệt daily quota vs RPM
 const geminiCooldowns = new Map<string, number>();
 const GEMINI_RPM_COOLDOWN_MS  = 2 * 60 * 1000;      // 2 phút
-const GEMINI_DAILY_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4 giờ (daily quota sẽ không reset sớm hơn)
+const GEMINI_DAILY_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4 giờ
 
 function isGeminiCoolingDown(id: string): boolean {
   const t = geminiCooldowns.get(id);
@@ -132,7 +132,7 @@ async function cleanWithGemini(segments: TranscriptSegment[]): Promise<any> {
       }
     }
   }
-  throw lastError;
+  throw lastError ?? new Error("All Gemini model+key combos are cooling down (quota exhausted)");
 }
 
 // Mutable key list — keys that hit 429 are moved to the back
@@ -289,7 +289,8 @@ export async function cleanTranscript(segments: TranscriptSegment[]) {
           await sleep(30000);
           chunkRetries--;
         } else {
-          throw new Error(`CLEAN_JOB_FAILED: AI services unavailable after retries (Chunk ${i+1}/${chunks.length}). Rerun to resume from chunk ${i+1}. Last error: ${error.message?.slice(0, 200)}`);
+          const errMsg = error?.message ?? String(error) ?? "unknown";
+          throw new Error(`CLEAN_JOB_FAILED: AI services unavailable after retries (Chunk ${i+1}/${chunks.length}). Rerun to resume from chunk ${i+1}. Last error: ${errMsg.slice(0, 200)}`);
         }
       }
     }
