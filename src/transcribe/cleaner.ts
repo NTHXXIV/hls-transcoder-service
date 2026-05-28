@@ -29,8 +29,6 @@ NHIỆM VỤ:
 
    Danh sách ticker phổ biến để tham chiếu: VIC, VHM, VNM, HPG, MSN, TCB, VCB, BID, CTG, MBB, ACB, STB, SSI, FPT, REE, PNJ, MWG, DGC, GAS, SAB, VND, VPB, HDB, LPB, SHB, EIB, VIB, OCB, TPB, BVH, VJC, HVN, GMD, PVD, BSR, OIL, GVR, VRE, BCM, QNS, KDC, NLG, DXG, PDR, NVL, CII, DIG, HDG, KBC, SZC, IDC, PHR, CSV, DPM, DCM.
 3. GIỮ NGUYÊN THỜI GIAN: Tuyệt đối không thay đổi giá trị "start" và "end" của các segment.
-4. TÓM TẮT: Viết một đoạn tóm tắt nội dung của ĐOẠN NÀY (khoảng 1-2 câu).
-5. TỪ KHÓA: Trích xuất 3-5 từ khóa quan trọng của ĐOẠN NÀY.
 
 YÊU CẦU ĐẦU RA:
 - Trả về duy nhất 1 JSON block.
@@ -40,9 +38,7 @@ YÊU CẦU ĐẦU RA:
 Cấu trúc JSON:
 {
   "cleanedSegments": [{ "start": number, "end": number, "text": string }],
-  "cleanedFullText": string,
-  "summary": string,
-  "keywords": [string]
+  "cleanedFullText": string
 }
 
 INPUT JSON:
@@ -170,7 +166,7 @@ async function cleanWithGroq(segments: TranscriptSegment[]): Promise<any> {
   // Try each model × each key (keys order is dynamic)
   for (let i = 0; i < GROQ_MODELS.length; i++) {
     const idx = (lastSuccessfulGroqModelIndex + i) % GROQ_MODELS.length;
-    const modelName = GROQ_MODELS[idx];
+    const modelName = GROQ_MODELS[idx]!;
 
     const keys = availableGroqKeys();
     if (keys.length === 0) continue; // all keys cooling down, try next model
@@ -201,12 +197,18 @@ async function cleanWithGroq(segments: TranscriptSegment[]): Promise<any> {
 }
 
 
-function chunkSegments(segments: TranscriptSegment[], chunkSize: number = 30): TranscriptSegment[][] {
-  const chunks: TranscriptSegment[][] = [];
+function chunkSegments(
+  segments: TranscriptSegment[],
+  chunkSize: number = 30,
+  overlap: number = 3,
+): Array<{ chunk: TranscriptSegment[]; overlapCount: number }> {
+  const result: Array<{ chunk: TranscriptSegment[]; overlapCount: number }> = [];
   for (let i = 0; i < segments.length; i += chunkSize) {
-    chunks.push(segments.slice(i, i + chunkSize));
+    const overlapStart = Math.max(0, i - overlap);
+    const overlapCount = i - overlapStart;
+    result.push({ chunk: segments.slice(overlapStart, i + chunkSize), overlapCount });
   }
-  return chunks;
+  return result;
 }
 
 // ─── Chunk cache (temp file) — resume khi process bị crash giữa chừng ────────
@@ -237,10 +239,8 @@ async function clearChunkCache(key: string): Promise<void> {
 }
 
 export async function cleanTranscript(segments: TranscriptSegment[]) {
-  const chunks = chunkSegments(segments, 30);
+  const chunks = chunkSegments(segments, 30, 3);
   const allCleanedSegments: TranscriptSegment[] = [];
-  const allSummaries: string[] = [];
-  const allKeywords = new Set<string>();
 
   const cacheKey = chunkCacheKey(segments);
   const cache = await loadChunkCache(cacheKey);
@@ -252,20 +252,18 @@ export async function cleanTranscript(segments: TranscriptSegment[]) {
   }
 
   for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i]!;
+    const { chunk, overlapCount } = chunks[i]!;
 
     // Resume từ cache nếu chunk này đã được xử lý
     if (cache[i]) {
       const cached = cache[i];
       console.log(`⏭ Chunk ${i + 1}/${chunks.length} (from cache)`);
       if (cached.cleanedSegments) allCleanedSegments.push(...cached.cleanedSegments);
-      else allCleanedSegments.push(...chunk);
-      if (cached.summary) allSummaries.push(cached.summary);
-      if (Array.isArray(cached.keywords)) cached.keywords.forEach((k: string) => allKeywords.add(k.toLowerCase()));
+      else allCleanedSegments.push(...chunk.slice(overlapCount));
       continue;
     }
 
-    console.log(`⏳ Processing chunk ${i + 1}/${chunks.length}...`);
+    console.log(`⏳ Processing chunk ${i + 1}/${chunks.length}${overlapCount > 0 ? ` (${overlapCount} overlap)` : ""}...`);
 
     let result: any = null;
     let chunkRetries = 2;
@@ -295,21 +293,15 @@ export async function cleanTranscript(segments: TranscriptSegment[]) {
       }
     }
 
-    // Lưu chunk vào cache ngay sau khi xử lý xong
-    cache[i] = result;
+    // Lưu chunk vào cache — lưu phần đã bỏ overlap để restore đúng
+    const freshSegments = result.cleanedSegments
+      ? result.cleanedSegments.slice(overlapCount)
+      : chunk.slice(overlapCount);
+    cache[i] = { cleanedSegments: freshSegments };
     await saveChunkCache(cacheKey, cache);
 
-    // Gộp kết quả
-    if (result.cleanedSegments) {
-      allCleanedSegments.push(...result.cleanedSegments);
-    } else {
-      allCleanedSegments.push(...chunk);
-    }
-
-    if (result.summary) allSummaries.push(result.summary);
-    if (Array.isArray(result.keywords)) {
-      result.keywords.forEach((k: string) => allKeywords.add(k.toLowerCase()));
-    }
+    // Gộp kết quả — bỏ overlap segments ở đầu chunk
+    allCleanedSegments.push(...freshSegments);
 
     // Short pause between chunks to avoid burst TPM
     if (i < chunks.length - 1) await sleep(3000);
@@ -319,17 +311,9 @@ export async function cleanTranscript(segments: TranscriptSegment[]) {
   await clearChunkCache(cacheKey);
 
   const finalFullText = allCleanedSegments.map(s => s.text).join(" ");
-  const finalSummary = allSummaries.join(" ");
-  const finalKeywords = Array.from(allKeywords).slice(0, 10);
-
-  // Đảm bảo summary không rỗng để pass backend validation
-  const validatedSummary = finalSummary.trim().length > 0 ? finalSummary : "(Bản tóm tắt đang được tạo)";
-  const validatedKeywords = finalKeywords.length > 0 ? finalKeywords : ["video"];
 
   return {
     cleanedFullText: finalFullText,
     cleanedSegments: allCleanedSegments,
-    summary: validatedSummary,
-    keywords: validatedKeywords
   };
 }

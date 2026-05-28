@@ -16,9 +16,11 @@ def transcribe(audio_path, model_size="base", initial_prompt=None):
     
     # Bật tính năng log tiến độ ra stderr để Node.js bắt được
     segments, info = model.transcribe(
-        audio_path, 
-        beam_size=5, 
-        initial_prompt=initial_prompt
+        audio_path,
+        beam_size=5,
+        initial_prompt=initial_prompt,
+        vad_filter=True,
+        vad_parameters=dict(min_silence_duration_ms=500),
     )
     
     print(f"DEBUG: Detected language {info.language} with probability {info.language_probability:.2f}", file=sys.stderr)

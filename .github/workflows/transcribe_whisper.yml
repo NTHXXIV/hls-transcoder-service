@@ -7,11 +7,16 @@ on:
 jobs:
   whisper:
     name: Whisper Transcription
-    # Chỉ chạy nếu không có stage=clean (đây là luồng mặc định)
-    if: github.event.client_payload.stage != 'clean'
+    # Chỉ chạy nếu không có stage=clean và không có stage=summarize (đây là luồng mặc định)
+    if: github.event.client_payload.stage != 'clean' && github.event.client_payload.stage != 'summarize'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Mask Sensitive Payload
+        run: |
+          echo "::add-mask::${{ toJson(github.event.client_payload) }}"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 24

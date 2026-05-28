@@ -8,15 +8,40 @@ Tài liệu này tổng hợp các giải pháp và lộ trình kỹ thuật đ�
 
 Dữ liệu được quản lý theo cấu trúc phân cấp: **Courses -> Sections -> Lessons (Transcript Data)**.
 
+### Transcript Pipeline (3 bước độc lập)
+
+```
+[whisper] → transcript-raw.json   (raw ASR segments, timestamps)
+    ↓
+[clean]   → transcript-clean.json (segments đã sửa lỗi, không có summary)
+    ↓
+[summarize] → transcript-clean.json (thêm summary + keywords từ full clean text)
+```
+
+Mỗi bước là GitHub Action job riêng, admin trigger độc lập. Default flow auto-chain.
+
+**Transcript modes:**
+- `lecture`: chạy cả 3 bước (video 1 người nói)
+- `workshop`: chỉ chạy whisper (multi-speaker, hội thoại — AI clean sẽ làm mất rhythm)
+
+**DB fields liên quan:**
+- `transcriptSegments` — best available (clean nếu đã chạy, else raw)
+- `transcriptIsCleaned` — flag phân biệt clean/raw
+- `transcriptJsonUrl` — URL `transcript-raw.json`
+- `transcriptCleanJsonUrl` — URL `transcript-clean.json` (null nếu chưa clean)
+- `transcriptSummary`, `transcriptKeywords` — chỉ có sau bước summarize
+
 ### Vectorization (Vector hóa)
 - **Phạm vi (Scope):** Thực hiện vector hóa ở cấp độ **Course**. Điều này giúp AI có cái nhìn tổng thể về toàn bộ lộ trình kiến thức, cho phép truy xuất thông tin chéo giữa các bài học (Lesson) khác nhau.
-- **Tiền xử lý (Preprocessing):** Chỉ vector hóa dữ liệu đã qua bước **Clean AI**. Việc sử dụng văn bản sạch giúp giảm nhiễu (loại bỏ từ đệm, lỗi chính tả, câu lủng củng), từ đó tăng độ chính xác của kết quả tìm kiếm vector.
+- **Tiền xử lý (Preprocessing):** Chỉ vector hóa lesson có `transcriptIsCleaned = true`. Dùng `transcript-clean.json` làm source (không dùng raw). Văn bản sạch giúp giảm nhiễu, tăng độ chính xác kết quả tìm kiếm.
+- **Workshop content:** Vector hóa từ `transcript-raw.json` (không có clean version) — chấp nhận chất lượng thấp hơn.
 
 ### Metadata Strategy (Chiến lược Gán nhãn)
 Mỗi đoạn văn bản (chunk) trong Vector DB cần được đính kèm các thông tin sau:
 - `course_id`, `section_id`, `lesson_id`: Định vị chính xác nguồn gốc.
 - `timestamp`: Phục vụ việc trích dẫn nguồn (ví dụ: "Xem tại 10:15 bài học X").
 - `content_type`: Phân loại nội dung (Transcript/Summary/Key points).
+- `is_cleaned`: Phân biệt raw vs clean segment khi search.
 
 ---
 
@@ -58,9 +83,14 @@ Mỗi đoạn văn bản (chunk) trong Vector DB cần được đính kèm các
 
 ## 4. Lộ trình Triển khai (Roadmap)
 
-1. **Giai đoạn 1 (Data Clean):** Hoàn thiện script Clean AI để đảm bảo mọi transcript trên R2 đều là bản "sạch".
-2. **Giai đoạn 2 (Indexing):** Xây dựng Worker tự động đồng bộ từ R2 sang Vector DB (Pinecone, Weaviate...).
-3. **Giai đoạn 3 (AI Writer):** Phát triển ứng dụng "AI Writer" với giao diện chọn Course -> Duyệt Outline -> Tạo nội dung -> Xuất bản.
+1. **Giai đoạn 1 (Transcript Architecture):** *(đang làm)*
+   - Tách R2 key: `transcript-raw.json` và `transcript-clean.json`
+   - Thêm DB fields: `transcriptIsCleaned`, `transcriptCleanJsonUrl`
+   - Thêm GitHub Action workflow: `summarize` (bước 3 độc lập)
+   - Summary + keywords sinh từ full clean text (1 AI call), không per-chunk
+2. **Giai đoạn 2 (Data Backfill):** Chạy summarize cho các lesson đã có clean transcript
+3. **Giai đoạn 3 (Indexing):** Worker tự động đồng bộ từ R2 sang Vector DB (Pinecone, Weaviate...) — chỉ index lesson có `transcriptIsCleaned = true`
+4. **Giai đoạn 4 (AI Writer):** Ứng dụng "AI Writer" với giao diện chọn Course → Duyệt Outline → Tạo nội dung → Xuất bản.
 
 ---
 

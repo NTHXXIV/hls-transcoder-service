@@ -29,8 +29,6 @@ async function test() {
     try {
       const result = await cleanTranscript(mockSegments);
       console.log("✅ Result from Groq:", result.cleanedFullText);
-      console.log("📋 Summary:", result.summary);
-      console.log("🏷️ Keywords:", result.keywords);
     } catch (e: any) {
       console.error("❌ Groq failed:", e.message);
     }

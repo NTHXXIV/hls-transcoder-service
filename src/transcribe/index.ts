@@ -16,6 +16,7 @@ import { sendCallback, validateCallbackUrl } from "../shared/callback.js";
 import { createR2Client } from "../shared/r2.js";
 import { extractAudio, getVideoDuration } from "../shared/utils.js";
 import { cleanTranscript } from "./cleaner.js";
+import { summarizeTranscript } from "./summarizer.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -31,21 +32,21 @@ export function validatePayload(payload: any) {
   }
 }
 
-async function uploadToR2(payload: any, resultPath: string) {
+async function uploadToR2(payload: any, resultPath: string, filename: string) {
   const PRIVATE_KEY = process.env.TRANSCODER_PRIVATE_KEY;
   const { target_r2_config } = payload;
   const ACCESS_KEY_ID = decrypt(target_r2_config.access_key_id, PRIVATE_KEY!);
   const SECRET_ACCESS_KEY = decrypt(target_r2_config.secret_access_key, PRIVATE_KEY!);
   const client = createR2Client(target_r2_config.endpoint, ACCESS_KEY_ID, SECRET_ACCESS_KEY);
-  const transcriptKey = `${target_r2_config.prefix}/transcript.json`;
-  
+  const transcriptKey = `${target_r2_config.prefix}/${filename}`;
+
   await client.send(new PutObjectCommand({
     Bucket: target_r2_config.bucket,
     Key: transcriptKey,
     Body: readFileSync(resultPath),
     ContentType: "application/json",
   }));
-  
+
   return `${target_r2_config.public_base_url.replace(/\/$/, "")}/${transcriptKey}`;
 }
 
@@ -94,7 +95,7 @@ export async function runTranscriptionJob() {
       };
       await fs.writeFile(resultPath, JSON.stringify(finalResult, null, 2));
 
-      const transcriptUrl = await uploadToR2(payload, resultPath);
+      const transcriptUrl = await uploadToR2(payload, resultPath, "transcript-raw.json");
       await sendCallback(payload.callback_url, {
         resourceId, jobId: payload.job_id, status: "whisper_success",
         transcriptUrl, fullText: finalResult.fullText, segments: finalResult.segments, metadata: finalResult.metadata
@@ -116,21 +117,19 @@ export async function runTranscriptionJob() {
 
       await sendCallback(payload.callback_url, { resourceId, jobId: payload.job_id, status: "clean_processing" }, payload.callback_client_id);
 
-      const { cleanedFullText, cleanedSegments, summary, keywords } = await cleanTranscript(raw.segments);
+      const { cleanedFullText, cleanedSegments } = await cleanTranscript(raw.segments);
       const finalSegments = cleanedSegments.filter((s: any) => s.text && s.text.trim().length > 0);
       const resultPath = path.join(workingDir, "cleaned.json");
 
       const finalResult = {
         jobId: payload.job_id, resourceId,
-        metadata: { title: payload.title, durationSeconds: raw.duration_seconds, isCleaned: true, summary, keywords },
+        metadata: { title: payload.title, durationSeconds: raw.duration_seconds, isCleaned: true },
         fullText: cleanedFullText,
-        rawFullText: raw.full_text,
         segments: finalSegments,
-        rawSegments: raw.segments
       };
 
       await fs.writeFile(resultPath, JSON.stringify(finalResult, null, 2));
-      const transcriptUrl = await uploadToR2(payload, resultPath);
+      const transcriptUrl = await uploadToR2(payload, resultPath, "transcript-clean.json");
 
       await sendCallback(payload.callback_url, {
         resourceId, jobId: payload.job_id, status: "clean_success",
@@ -138,9 +137,41 @@ export async function runTranscriptionJob() {
       }, payload.callback_client_id);
     }
 
+    // --- MODE: SUMMARIZE ---
+    if (mode === "--summarize") {
+      console.log(`📝 Running Summarize: ${jobId}`);
+      if (!payload.clean_url) throw new Error("Missing 'clean_url' (URL to transcript-clean.json)");
+
+      await sendCallback(payload.callback_url, { resourceId, jobId: payload.job_id, status: "summarize_processing" }, payload.callback_client_id);
+
+      console.log(`📥 Fetching clean transcript from: ${payload.clean_url}`);
+      const cleanResp = await fetch(payload.clean_url);
+      if (!cleanResp.ok) throw new Error(`Failed to fetch clean transcript (${cleanResp.status})`);
+      const clean: any = await cleanResp.json();
+
+      const fullText: string = clean.fullText || clean.full_text || "";
+      if (!fullText.trim()) throw new Error("Clean transcript has no fullText");
+
+      const { summary, keywords } = await summarizeTranscript(fullText);
+
+      // Update transcript-clean.json with summary + keywords
+      const updatedClean = { ...clean, metadata: { ...clean.metadata, summary, keywords } };
+      const resultPath = path.join(workingDir, "summarized.json");
+      await fs.writeFile(resultPath, JSON.stringify(updatedClean, null, 2));
+      const transcriptUrl = await uploadToR2(payload, resultPath, "transcript-clean.json");
+
+      await sendCallback(payload.callback_url, {
+        resourceId, jobId: payload.job_id, status: "summarize_success",
+        transcriptUrl,
+        metadata: { ...clean.metadata, isCleaned: true, summary, keywords },
+      }, payload.callback_client_id);
+    }
+
   } catch (error: any) {
     console.error(`❌ Error: ${error.message}`);
-    const status = mode === "--whisper" ? "whisper_failed" : "clean_failed";
+    const status = mode === "--whisper" ? "whisper_failed"
+      : mode === "--summarize" ? "summarize_failed"
+      : "clean_failed";
     await sendCallback(payload.callback_url, { resourceId, jobId: payload.job_id, status, error: error.message }, payload.callback_client_id);
     process.exit(1);
   } finally {

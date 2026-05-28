@@ -1,14 +1,14 @@
-name: Media Transcription (Gemini Clean)
+name: Media Transcription (Summarize)
 
 on:
   repository_dispatch:
     types: [build-transcription]
 
 jobs:
-  clean:
-    name: Gemini Cleaning
-    # Chỉ chạy nếu BE chủ động yêu cầu stage=clean
-    if: github.event.client_payload.stage == 'clean'
+  summarize:
+    name: AI Summarize
+    # Only runs when stage=summarize is explicitly requested
+    if: github.event.client_payload.stage == 'summarize'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +25,7 @@ jobs:
       - name: Install Node Dependencies
         run: npm ci || npm install
 
-      - name: Run Gemini Clean
+      - name: Run Summarize
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
@@ -41,4 +41,4 @@ jobs:
           PAYLOAD_JSON: ${{ toJson(github.event.client_payload) }}
         run: |
           node -e "require('fs').writeFileSync('payload.json', process.env.PAYLOAD_JSON)"
-          npx tsx src/transcribe/index.ts payload.json --clean
+          npx tsx src/transcribe/index.ts payload.json --summarize

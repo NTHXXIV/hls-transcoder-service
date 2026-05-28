@@ -27,6 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { cleanTranscript, type TranscriptSegment } from "../src/transcribe/cleaner.js";
+import { summarizeTranscript } from "../src/transcribe/summarizer.js";
 import { createR2Client } from "../src/shared/r2.js";
 
 const BLOG_PROMPT_PATH = path.resolve("./prompts/blog-writer.md");
@@ -542,8 +543,9 @@ async function processRow(
   const { segments, resources } = parseTranscript(row["Transcript"]!);
   console.log(`\n🧹 Cleaning transcript (${segments.length} segments)...`);
   if (resources) console.log(`   📎 Resources found (${resources.length} chars)`);
-  const { cleanedFullText, summary, keywords } = await cleanTranscript(segments);
+  const { cleanedFullText } = await cleanTranscript(segments);
   console.log(`   ✅ Cleaned (${cleanedFullText.length} chars)`);
+  const { summary, keywords } = await summarizeTranscript(cleanedFullText);
   if (summary && keywords.length > 0) {
     console.log(`   📋 Outline: ${keywords.slice(0, 5).join(", ")}...`);
   }
