@@ -8,31 +8,26 @@ Xử lý video và transcript cho Stag platform — chạy trên GitHub Actions 
 
 Băm video MP4 sang HLS adaptive bitrate (480p / 720p / 1080p), upload lên Cloudflare R2.
 
-**Trigger:**
-```bash
-curl -X POST \
-  -H "Authorization: token YOUR_GITHUB_PAT" \
-  -H "Accept: application/vnd.github.v3+json" \
-  https://api.github.com/repos/NTHXXIV/media-processor-service/dispatches \
-  -d '{
-    "event_type": "build-hls",
-    "client_payload": {
-      "resource_id": "lesson-uuid",
-      "source_url": "https://cdn.example.com/video.mp4",
-      "variants": "480p,720p,1080p",
-      "segment_seconds": 6,
-      "callback_url": "https://api.stag.vn/internal/media/hls/callback",
-      "callback_client_id": "stagapps-prod",
-      "target_r2_config": {
-        "endpoint": "https://<id>.r2.cloudflarestorage.com",
-        "access_key_id": "ENCRYPTED",
-        "secret_access_key": "ENCRYPTED",
-        "bucket": "stag-edu",
-        "prefix": "lessons/<uuid>/hls/v2",
-        "public_base_url": "https://edu-cdn.stag.vn"
-      }
+**Trigger payload:**
+```json
+{
+  "event_type": "build-hls",
+  "client_payload": {
+    "resource_id": "lesson-uuid",
+    "source_url": "https://cdn.example.com/video.mp4",
+    "variants": "480p,720p,1080p",
+    "callback_url": "https://api.stag.vn/internal/media/hls/callback",
+    "callback_client_id": "stagapps-prod",
+    "target_r2_config": {
+      "endpoint": "https://<id>.r2.cloudflarestorage.com",
+      "access_key_id": "ENCRYPTED",
+      "secret_access_key": "ENCRYPTED",
+      "bucket": "stag-edu",
+      "prefix": "lessons/<uuid>/hls/v2",
+      "public_base_url": "https://edu-cdn.stag.vn"
     }
-  }'
+  }
+}
 ```
 
 **R2 output:** `{prefix}/master.m3u8`, `{prefix}/480p.m3u8`, `{prefix}/720p_00001.ts`, ...
@@ -41,37 +36,35 @@ curl -X POST \
 
 ---
 
-### 2. Whisper Transcription (`build-transcription`, stage: whisper)
+### 2. Whisper Transcription (`build-transcription-whisper`)
 
 Chạy Whisper ASR để tạo raw transcript từ video.
+Processor chỉ xử lý và trả data inline — **không upload R2**. BE nhận callback và tự upload R2.
 
-**Trigger:** `event_type: "build-transcription"` — **không** có `stage` hoặc `stage != "clean"` và `stage != "summarize"`
-
-```bash
-curl -X POST \
-  -H "Authorization: token YOUR_GITHUB_PAT" \
-  -H "Accept: application/vnd.github.v3+json" \
-  https://api.github.com/repos/NTHXXIV/media-processor-service/dispatches \
-  -d '{
-    "event_type": "build-transcription",
-    "client_payload": {
-      "resource_id": "lesson-uuid",
-      "source_url": "https://edu-cdn.stag.vn/lessons/<uuid>/video.mp4",
-      "model_size": "medium",
-      "callback_url": "https://api.stag.vn/internal/media/transcription/callback",
-      "callback_client_id": "stagapps-prod",
-      "target_r2_config": { ... }
-    }
-  }'
-```
-
-**R2 output:** `{prefix}/transcript-raw.json`
-
+**Trigger payload:**
 ```json
 {
-  "segments": [{ "start": 0.0, "end": 4.2, "text": "..." }],
+  "event_type": "build-transcription-whisper",
+  "client_payload": {
+    "resource_id": "lesson-uuid",
+    "source_url": "https://edu-cdn.stag.vn/lessons/<uuid>/video.mp4",
+    "model_size": "medium",
+    "title": "Tên bài học",
+    "initial_prompt": "...",
+    "callback_url": "https://api.stag.vn/internal/media/transcription/callback",
+    "callback_client_id": "stagapps-prod"
+  }
+}
+```
+
+**Callback success body:**
+```json
+{
+  "resourceId": "lesson-uuid",
+  "status": "whisper_success",
   "fullText": "...",
-  "metadata": { "isCleaned": false, "model": "medium" }
+  "segments": [{ "start": 0.0, "end": 4.2, "text": "..." }],
+  "metadata": { "durationSeconds": 123, "model": "medium", "isCleaned": false }
 }
 ```
 
@@ -79,33 +72,34 @@ curl -X POST \
 
 ---
 
-### 3. AI Clean (`build-transcription`, stage: clean)
+### 3. AI Clean (`build-transcription-clean`)
 
-Dùng Groq / Gemini để sửa lỗi ASR, chuẩn hóa text. Input là raw segments từ whisper.
+Dùng Groq / Gemini để sửa lỗi ASR, chuẩn hóa text.
+Input: `raw_url` — R2 URL do BE upload trước khi dispatch.
+Processor fetch `raw_url`, xử lý, trả data inline.
 
-**Trigger:** `event_type: "build-transcription"`, `stage: "clean"`
-
-```bash
--d '{
-  "event_type": "build-transcription",
-  "client_payload": {
-    "stage": "clean",
-    "resource_id": "lesson-uuid",
-    "raw_url": "https://edu-cdn.stag.vn/lessons/<uuid>/transcript-raw.json",
-    "callback_url": "...",
-    "callback_client_id": "stagapps-prod",
-    "target_r2_config": { ... }
-  }
-}'
-```
-
-**R2 output:** `{prefix}/transcript-clean.json`
-
+**Trigger payload:**
 ```json
 {
-  "segments": [{ "start": 0.0, "end": 4.2, "text": "..." }],
+  "event_type": "build-transcription-clean",
+  "client_payload": {
+    "resource_id": "lesson-uuid",
+    "raw_url": "https://edu-cdn.stag.vn/lessons/<uuid>/transcripts/raw-input-xxx.json",
+    "model_size": "medium",
+    "callback_url": "https://api.stag.vn/internal/media/transcription/callback",
+    "callback_client_id": "stagapps-prod"
+  }
+}
+```
+
+**Callback success body:**
+```json
+{
+  "resourceId": "lesson-uuid",
+  "status": "clean_success",
   "fullText": "...",
-  "metadata": { "isCleaned": true }
+  "segments": [{ "start": 0.0, "end": 4.2, "text": "..." }],
+  "metadata": { "durationSeconds": 123, "isCleaned": true }
 }
 ```
 
@@ -113,39 +107,50 @@ Dùng Groq / Gemini để sửa lỗi ASR, chuẩn hóa text. Input là raw segm
 
 ---
 
-### 4. Summarize (`build-transcription`, stage: summarize) — Planned
+### 4. Summarize (`build-transcription-summarize`)
 
 Sinh summary + keywords từ clean transcript (1 AI call trên toàn bộ clean fullText).
-Không chạy per-chunk — đảm bảo summary là holistic, keywords chính xác theo full context.
+Input: `clean_url` — R2 URL của clean transcript (set bởi BE sau bước clean).
 
-**Trigger:** `stage: "summarize"`, input là `clean_url` trỏ vào `transcript-clean.json`
+**Trigger payload:**
+```json
+{
+  "event_type": "build-transcription-summarize",
+  "client_payload": {
+    "resource_id": "lesson-uuid",
+    "clean_url": "https://edu-cdn.stag.vn/lessons/<uuid>/transcripts/clean-xxx.json",
+    "callback_url": "https://api.stag.vn/internal/media/transcription/callback",
+    "callback_client_id": "stagapps-prod"
+  }
+}
+```
 
-**R2 output:** Update `transcript-clean.json` (thêm `summary`, `keywords`)
+**Callback success body:**
+```json
+{
+  "resourceId": "lesson-uuid",
+  "status": "summarize_success",
+  "fullText": "...",
+  "metadata": { "isCleaned": true, "summary": "...", "keywords": ["..."] }
+}
+```
 
-**Callback status:** `summarize_success` | `summarize_failed`
+**Callback statuses:** `summarize_processing` → `summarize_success` | `summarize_failed`
 
 ---
 
 ## Pipeline Transcript
 
 ```
-[whisper]  → transcript-raw.json  → whisper_success callback
-    ↓
-[clean]    → transcript-clean.json (segments only) → clean_success callback
-    ↓
-[summarize] → transcript-clean.json (+ summary + keywords) → summarize_success callback
+BE dispatch(source_url) → [whisper] → callback(fullText, segments) → BE upload R2
+                                                ↓
+BE dispatch(raw_url) ──→ [clean]   → callback(fullText, segments) → BE upload R2
+                                                ↓
+BE dispatch(clean_url) → [summarize] → callback(fullText, metadata) → BE upload R2
 ```
 
-Mỗi bước là job độc lập — admin có thể trigger riêng lẻ. Default flow tự động chain sau mỗi bước thành công.
-
-### Transcript modes
-
-| Mode | Steps chạy | Dùng khi |
-|---|---|---|
-| `lecture` | whisper → clean → summarize | Video 1 người nói liên tục |
-| `workshop` | whisper only | Multi-speaker, hội thoại nhiều người |
-
-Workshop không chạy clean/summarize vì AI clean sẽ làm mất rhythm hội thoại và segment pattern không phù hợp.
+Mỗi bước là job độc lập — admin có thể trigger riêng lẻ.
+**Processor không cần R2 write access cho transcription** — chỉ cần đọc input URL (public) và gửi data inline về BE.
 
 ---
 
@@ -153,33 +158,35 @@ Workshop không chạy clean/summarize vì AI clean sẽ làm mất rhythm hội
 
 ```
 lessons/{lessonId}/
-  video.mp4                    # Source MP4
   hls/v2/
     master.m3u8
     480p.m3u8
-    720p.m3u8
-    480p_00001.ts
+    720p_00001.ts
     ...
-  transcript-raw.json          # Whisper ASR output (không bao giờ bị ghi đè bởi clean)
-  transcript-clean.json        # AI-cleaned output (có summary + keywords sau bước summarize)
+  transcripts/
+    raw-input-{timestamp}.json     # BE upload trước khi dispatch clean
+    raw-{timestamp}.json           # BE upload sau whisper_success
+    clean-{timestamp}.json         # BE upload sau clean_success
+    summarize-{timestamp}.json     # BE upload sau summarize_success
 ```
 
 ---
 
 ## Bảo mật
 
-### R2 Credentials — RSA Encryption
+### R2 Credentials — HLS only
 
-`access_key_id` và `secret_access_key` được mã hóa bằng public key trước khi đưa vào `client_payload`:
+`target_r2_config` với encrypted credentials chỉ dùng cho HLS workflow.
+Transcription workflow **không nhận** `target_r2_config` — BE tự upload R2 sau khi nhận callback.
 
 ```bash
-# Tạo key pair
+# Tạo key pair cho HLS
 openssl genrsa -out private.pem 2048
 openssl rsa -in private.pem -pubout -out public.pem
 ```
 
-- `TRANSCODER_PRIVATE_KEY` → lưu vào GitHub Secrets (nội dung `private.pem`)
-- Public key lưu ở backend để encrypt trước khi dispatch
+- `TRANSCODER_PRIVATE_KEY` → GitHub Secret (nội dung `private.pem`) — chỉ dùng cho HLS
+- Public key lưu ở backend để encrypt trước khi dispatch HLS
 
 ### Callback Secret
 
@@ -187,11 +194,11 @@ Multi-client secret theo `callback_client_id`:
 - `callback_client_id: "stagapps-prod"` → GitHub Secret: `HLS_CALLBACK_SECRET_STAGAPPS_PROD`
 - `callback_client_id: "stagapps-sandbox"` → GitHub Secret: `HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX`
 
+Header gửi kèm callback: `x-hls-callback-secret: <secret>`
+
 ---
 
 ## Callback Field Reference
-
-Canonical field names (camelCase). `resource_id` / `lesson_id` được normalize về `resourceId`.
 
 **HLS callback body:**
 ```ts
@@ -212,17 +219,17 @@ Canonical field names (camelCase). `resource_id` / `lesson_id` được normaliz
 {
   resourceId: string        // lesson ID hoặc community video ID
   status: "whisper_processing" | "whisper_success" | "whisper_failed"
-       | "clean_processing" | "clean_success" | "clean_failed"
+       | "clean_processing"   | "clean_success"   | "clean_failed"
        | "summarize_processing" | "summarize_success" | "summarize_failed"
-  transcriptUrl?: string    // URL R2 JSON
   fullText?: string
   segments?: Array<{ start: number; end: number; text: string }>
   metadata?: {
     isCleaned: boolean
-    summary?: string        // chỉ có sau summarize_success
-    keywords?: string[]     // chỉ có sau summarize_success
     durationSeconds?: number
     model?: string
+    summary?: string        // chỉ có sau summarize_success
+    keywords?: string[]     // chỉ có sau summarize_success
   }
+  error?: string            // khi failed
 }
 ```

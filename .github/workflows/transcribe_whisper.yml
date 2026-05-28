@@ -2,13 +2,11 @@ name: Media Transcription (Whisper)
 
 on:
   repository_dispatch:
-    types: [build-transcription]
+    types: [build-transcription-whisper]
 
 jobs:
   whisper:
     name: Whisper Transcription
-    # Chỉ chạy nếu không có stage=clean và không có stage=summarize (đây là luồng mặc định)
-    if: github.event.client_payload.stage != 'clean' && github.event.client_payload.stage != 'summarize'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -50,7 +48,6 @@ jobs:
 
       - name: Run Whisper
         env:
-          TRANSCODER_PRIVATE_KEY: ${{ secrets.TRANSCODER_PRIVATE_KEY }}
           HLS_CALLBACK_SECRET: ${{ secrets.HLS_CALLBACK_SECRET }}
           ALLOWED_CALLBACK_DOMAINS: ${{ secrets.ALLOWED_CALLBACK_DOMAINS }}
           HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX: ${{ secrets.HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX }}

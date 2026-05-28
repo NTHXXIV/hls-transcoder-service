@@ -2,13 +2,11 @@ name: Media Transcription (Gemini Clean)
 
 on:
   repository_dispatch:
-    types: [build-transcription]
+    types: [build-transcription-clean]
 
 jobs:
   clean:
     name: Gemini Cleaning
-    # Chỉ chạy nếu BE chủ động yêu cầu stage=clean
-    if: github.event.client_payload.stage == 'clean'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -34,7 +32,6 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
-          TRANSCODER_PRIVATE_KEY: ${{ secrets.TRANSCODER_PRIVATE_KEY }}
           HLS_CALLBACK_SECRET: ${{ secrets.HLS_CALLBACK_SECRET }}
           ALLOWED_CALLBACK_DOMAINS: ${{ secrets.ALLOWED_CALLBACK_DOMAINS }}
           HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX: ${{ secrets.HLS_CALLBACK_SECRET_STAGAPPS_SANDBOX }}

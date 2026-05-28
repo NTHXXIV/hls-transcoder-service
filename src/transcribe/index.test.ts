@@ -1,24 +1,41 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { validatePayload } from './index.js';
 
-describe('Transcription Job Logic', () => {
-  
-  it('should throw error if mandatory fields are missing', () => {
-    const invalidPayload = { lesson_id: '123' };
-    expect(() => validatePayload(invalidPayload)).toThrow("Missing mandatory fields");
+describe('validatePayload', () => {
+
+  it('throws if resource_id is missing', () => {
+    expect(() => validatePayload({}, '--whisper')).toThrow("resource_id");
   });
 
-  it('should pass validation with all mandatory fields', () => {
-    const validPayload = {
-      lesson_id: '123',
-      source_url: 'https://example.com/video.mp4',
-      target_r2_config: {
-        endpoint: 'https://xxx.r2.cloudflarestorage.com',
-        bucket: 'test',
-        prefix: 'lessons/123'
-      }
-    };
-    expect(() => validatePayload(validPayload)).not.toThrow();
+  // whisper mode
+  it('whisper: throws if source_url is missing', () => {
+    expect(() => validatePayload({ resource_id: '123' }, '--whisper')).toThrow("source_url");
+  });
+
+  it('whisper: passes with source_url', () => {
+    expect(() => validatePayload({ resource_id: '123', source_url: 'https://example.com/v.mp4' }, '--whisper')).not.toThrow();
+  });
+
+  // clean mode
+  it('clean: throws if raw_url and raw are both missing', () => {
+    expect(() => validatePayload({ resource_id: '123' }, '--clean')).toThrow("raw_url");
+  });
+
+  it('clean: passes with raw_url', () => {
+    expect(() => validatePayload({ resource_id: '123', raw_url: 'https://example.com/raw.json' }, '--clean')).not.toThrow();
+  });
+
+  it('clean: passes with inline raw', () => {
+    expect(() => validatePayload({ resource_id: '123', raw: { segments: [] } }, '--clean')).not.toThrow();
+  });
+
+  // summarize mode
+  it('summarize: throws if clean_url is missing', () => {
+    expect(() => validatePayload({ resource_id: '123' }, '--summarize')).toThrow("clean_url");
+  });
+
+  it('summarize: passes with clean_url', () => {
+    expect(() => validatePayload({ resource_id: '123', clean_url: 'https://example.com/clean.json' }, '--summarize')).not.toThrow();
   });
 
 });
