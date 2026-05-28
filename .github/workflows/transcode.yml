@@ -12,21 +12,22 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Mask Sensitive Fields
+        if: github.event_name == 'repository_dispatch'
         run: |
           echo "::add-mask::${{ github.event.client_payload.callback_url }}"
           echo "::add-mask::${{ github.event.client_payload.callback_client_id }}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: "npm"
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Run Tests
         run: npm test
@@ -37,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Mask Sensitive Fields
         run: |
@@ -45,13 +46,13 @@ jobs:
           echo "::add-mask::${{ github.event.client_payload.callback_client_id }}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: "npm"
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -70,3 +71,5 @@ jobs:
 
           # Chạy transcoder với file payload
           npx tsx src/hls/index.ts payload.json
+
+          rm -f payload.json
