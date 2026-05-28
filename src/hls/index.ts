@@ -108,6 +108,14 @@ async function createHlsRenditions(
       "veryfast",
       `-profile:v:${i}`,
       "main",
+      // Force 8-bit output. Source videos may be encoded in 10-bit (e.g. captured with
+      // high-quality screen recorders), but H.264 "main" profile only supports 8-bit.
+      // Without this flag, ffmpeg errors: "main profile doesn't support a bit depth of 10".
+      // The 10-bit source actually helps quality — libx264 internally benefits from the
+      // wider input range when downsampling — so 8-bit HLS output from a 10-bit source
+      // is typically better than encoding an 8-bit source at the same bitrate.
+      `-pix_fmt:v:${i}`,
+      "yuv420p",
       `-g:v:${i}`,
       "48",
     );
