@@ -5,6 +5,10 @@
   "main": "index.js",
   "scripts": {
     "test": "vitest run",
+    "blog": "tsx --env-file=.env scripts/generate-blog.ts",
+    "blog:deploy": "tsx --env-file=.env scripts/generate-blog.ts --deploy",
+    "blog:tiktok": "tsx --env-file=.env scripts/generate-blog.ts --tiktok",
+    "blog:tiktok:deploy": "tsx --env-file=.env scripts/generate-blog.ts --tiktok --deploy",
     "generate-blog": "tsx --env-file=.env scripts/generate-blog.ts --csv"
   },
   "keywords": [],
