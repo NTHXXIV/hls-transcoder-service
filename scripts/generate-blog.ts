@@ -707,7 +707,11 @@ async function processRow(
         console.log(thumbnailUrl ? ` ✅` : " ❌ failed");
         if (thumbnailUrl) {
           let md = await fs.readFile(mdPath, "utf-8");
-          md = md.replace(/^(thumbnail:\s*).*$/m, `$1'${thumbnailUrl}'`);
+          if (/^thumbnail:\s*/m.test(md)) {
+            md = md.replace(/^(thumbnail:\s*).*$/m, `$1'${thumbnailUrl}'`);
+          } else {
+            md = md.replace(/^(date:\s*.+)$/m, `$1\nthumbnail: '${thumbnailUrl}'`);
+          }
           await fs.writeFile(mdPath, md, "utf-8");
         }
       }
@@ -805,7 +809,8 @@ async function processRow(
     slug,
     youtube_hash: hashYoutube(row),
     tiktok_hash:  hashTikTok(row),
-    thumbnail_hash: hashThumbnail(row),
+    // Only mark thumbnail as processed if upload succeeded — empty string forces retry next run
+    thumbnail_hash: thumbnailUrl ? hashThumbnail(row) : "",
     processed_at: new Date().toISOString(),
   };
   await saveState(state);
