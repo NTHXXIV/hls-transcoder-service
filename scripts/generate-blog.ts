@@ -1,21 +1,20 @@
 /**
  * Usage:
- *   npm run blog [-- options]           ← YouTube tab (default)
- *   npm run blog:tiktok [-- options]    ← TikTok tab
+ *   npm run blog [-- options]
  *
  * Options:
- *   --tiktok              Read TikTok tab instead of YouTube tab
- *   --csv  <PATH>         Override: use local CSV file instead of Google Sheet
+ *   --csv  <PATH>         Override: use local CSV file for YouTube tab (TikTok still fetched from sheet)
  *   --code <VIDEO_CODE>   Target specific video (default: first valid row)
  *   --row  <INDEX>        Target by row index
  *   --all                 Process all valid rows sequentially
  *   --limit <N>           Stop after N new posts (AI-generated)
  *
  * Flow:
- *   1. Fetch CSV from Google Sheet tab (or local file if --csv given)
- *   2. Parse CSV → pick row(s), skip if no transcript / hard-skip / series
- *   3. Diff check per field (youtube_hash, thumbnail_hash) vs state.json
- *   4. For youtube/thumbnail changes: update without AI
+ *   1. Fetch both YouTube and TikTok tabs from Google Sheet
+ *   2. Merge rows by Video_code — youtube_url / tiktok_url set per tab,
+ *      transcript taken from whichever tab has it (YouTube preferred)
+ *   3. Diff check per field (youtube_hash, tiktok_hash, thumbnail_hash) vs state.json
+ *   4. For link/thumbnail changes: update without AI
  *   5. For new posts only: Groq → clean transcript → Gemini 2.5 Flash → generate blog
  *   6. Thumbnail: Drive → R2 (URL stored in frontmatter, not in repo)
  *   7. Write to stagapps:
@@ -43,8 +42,8 @@ const CONTENT_BAI_VIET = path.join(STAGAPPS_ROOT, "content/blog/bai-viet");
 // Google Sheet tabs
 const SHEET_ID = "12OnnEqP56aNFH45ToKpdYrZpDR9Z5pvMkGP-lObh324";
 const SHEET_TABS = {
-  youtube: { gid: "653112896",  stateFile: "blog-state.json" },
-  tiktok:  { gid: "1841344130", stateFile: "blog-state-tiktok.json" },
+  youtube: { gid: "653112896" },
+  tiktok:  { gid: "1841344130" },
 } as const;
 
 async function fetchSheetCSV(tab: keyof typeof SHEET_TABS): Promise<string> {
@@ -249,11 +248,37 @@ function getValidRows(
   );
 }
 
+// ─── Merge YouTube + TikTok tabs by Video_code ───────────────────────────────
+
+function mergeTabRows(
+  ytRows: Record<string, string>[],
+  ttRows: Record<string, string>[],
+): Record<string, string>[] {
+  const ytMap = Object.fromEntries(ytRows.map((r) => [r["Video_code"], r]));
+  const ttMap = Object.fromEntries(ttRows.map((r) => [r["Video_code"], r]));
+  const allCodes = new Set([...Object.keys(ytMap), ...Object.keys(ttMap)]);
+
+  return [...allCodes].filter(Boolean).map((code) => {
+    const yt = ytMap[code];
+    const tt = ttMap[code];
+    // Prefer YouTube row as primary; fall back to TikTok if YT has no transcript
+    const primary =
+      yt?.["Transcript"]?.trim() ? yt : tt?.["Transcript"]?.trim() ? tt : (yt ?? tt!);
+    return {
+      ...primary,
+      youtube_url: yt?.["Published_link"]?.trim() ?? "",
+      tiktok_url:  tt?.["Published_link"]?.trim() ?? "",
+      Thumbnail:   yt?.["Thumbnail"]?.trim() || tt?.["Thumbnail"]?.trim() || "",
+    };
+  });
+}
+
 // ─── State tracking ───────────────────────────────────────────────────────────
 
 interface StateEntry {
   slug: string;
   youtube_hash: string;
+  tiktok_hash: string;
   thumbnail_hash: string;
   processed_at: string;
 }
@@ -274,7 +299,10 @@ function md5(s: string): string {
   return createHash("md5").update(s).digest("hex").slice(0, 10);
 }
 function hashYoutube(row: Record<string, string>): string {
-  return md5(row["Published_link"]?.trim() ?? "");
+  return md5(row["youtube_url"]?.trim() ?? "");
+}
+function hashTikTok(row: Record<string, string>): string {
+  return md5(row["tiktok_url"]?.trim() ?? "");
 }
 function hashThumbnail(row: Record<string, string>): string {
   return md5(row["Thumbnail"] ?? "");
@@ -341,6 +369,27 @@ async function updateYouTube(
     const m = md.match(/^##\s/m);
     if (m?.index) {
       md = md.slice(0, m.index) + iframe + "\n\n" + md.slice(m.index);
+    }
+  }
+  await fs.writeFile(mdPath, md, "utf-8");
+}
+
+async function updateTikTok(mdPath: string, tiktokUrl: string): Promise<void> {
+  const ttId = extractTikTokId(tiktokUrl);
+  if (!ttId) return;
+  const embed = tiktokEmbed(ttId, tiktokUrl);
+  let md = await fs.readFile(mdPath, "utf-8");
+  if (/class="tiktok-link"/.test(md)) {
+    // Replace existing TikTok link
+    md = md.replace(/<a[^>]+class="tiktok-link"[^>]*>[\s\S]*?<\/a>/i, embed);
+  } else if (/<\/iframe>/i.test(md)) {
+    // Add below YouTube iframe
+    md = md.replace(/(<\/iframe>)/i, `$1\n\n${embed}`);
+  } else {
+    // No iframe yet — inject before first ## heading
+    const m = md.match(/^##\s/m);
+    if (m?.index) {
+      md = md.slice(0, m.index) + embed + "\n\n" + md.slice(m.index);
     }
   }
   await fs.writeFile(mdPath, md, "utf-8");
@@ -509,8 +558,9 @@ async function generateBlog(
   const airDate = parseAirDate(
     row["Ngày air"]?.trim() || row["Ngày source raw được gửi"]?.trim() || "",
   );
-  const pubUrl = row["Published_link"]?.trim() ?? "";
-  const embed = pubUrl ? buildEmbed(pubUrl) : null;
+  const ytEmbed = row["youtube_url"] ? buildEmbed(row["youtube_url"]) : null;
+  const ttId = row["tiktok_url"] ? extractTikTokId(row["tiktok_url"]) : null;
+  const ttEmbedHtml = ttId ? tiktokEmbed(ttId, row["tiktok_url"]!) : null;
 
   const resourcesSection = resources
     ? `**resources** (links, tài liệu tham khảo — quyết định chèn vào vị trí phù hợp: inline, cuối section, hoặc cuối bài):\n${resources}\n`
@@ -531,7 +581,11 @@ Từ khóa chính: ${outline.keywords.join(", ")}
 
 **date**: ${airDate}
 **thumbnail**: ${thumbnailUrl ? thumbnailUrl : "không có — bỏ qua field thumbnail"}
-**video embed**: ${embed ? `chèn sau đoạn mở, trước heading đầu tiên:\n${embed.html}` : "không có"}
+**video embed**: ${
+    ytEmbed || ttEmbedHtml
+      ? `chèn sau đoạn mở, trước heading đầu tiên:\n${[ytEmbed?.html, ttEmbedHtml].filter(Boolean).join("\n\n")}`
+      : "không có"
+  }
 ${outlineSection}${resourcesSection}
 **transcript** (đã được làm sạch):
 ${cleanedTranscript}
@@ -623,6 +677,7 @@ Viết file index.md:`;
 interface ChangeFlags {
   isNew: boolean;
   youtubeChanged: boolean;
+  tiktokChanged: boolean;
   thumbnailChanged: boolean;
 }
 
@@ -659,16 +714,25 @@ async function processRow(
     }
 
     if (flags.youtubeChanged) {
-      const ytUrl = row["Published_link"]?.trim() ?? "";
+      const ytUrl = row["youtube_url"]?.trim() ?? "";
       if (ytUrl) {
         await updateYouTube(mdPath, ytUrl);
         console.log(`\n▶️  YouTube embed updated`);
       }
     }
 
+    if (flags.tiktokChanged) {
+      const ttUrl = row["tiktok_url"]?.trim() ?? "";
+      if (ttUrl) {
+        await updateTikTok(mdPath, ttUrl);
+        console.log(`\n▼  TikTok link updated`);
+      }
+    }
+
     state[videoCode] = {
       ...state[videoCode]!,
       youtube_hash: hashYoutube(row),
+      tiktok_hash:  hashTikTok(row),
       thumbnail_hash: hashThumbnail(row),
       processed_at: new Date().toISOString(),
     };
@@ -740,6 +804,7 @@ async function processRow(
   state[videoCode] = {
     slug,
     youtube_hash: hashYoutube(row),
+    tiktok_hash:  hashTikTok(row),
     thumbnail_hash: hashThumbnail(row),
     processed_at: new Date().toISOString(),
   };
@@ -758,7 +823,6 @@ async function main() {
 
   const opts = {
     all:      args.includes("--all"),
-    tiktok:   args.includes("--tiktok"),
     deploy:   args.includes("--deploy"),
     code:     getFlag("--code"),
     rowIndex: getFlag("--row") !== undefined ? parseInt(getFlag("--row")!) : undefined,
@@ -769,25 +833,55 @@ async function main() {
 
   if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY not set");
 
-  const tab = opts.tiktok ? "tiktok" : "youtube";
-
   if (opts.state) {
     STATE_PATH = path.isAbsolute(opts.state)
       ? opts.state
       : path.join(STAGAPPS_ROOT, "content", opts.state);
   } else {
-    STATE_PATH = path.join(STAGAPPS_ROOT, "content", SHEET_TABS[tab].stateFile);
+    // Unified state for both tabs
+    STATE_PATH = path.join(STAGAPPS_ROOT, "content", "blog-state.json");
   }
   console.log(`\n📁 State file: ${path.relative(STAGAPPS_ROOT, STATE_PATH)}`);
 
   const state = await loadState();
 
-  const csvContent = opts.csv
-    ? await fs.readFile(path.resolve(opts.csv), "utf-8")
-    : await fetchSheetCSV(tab);
-  const source = opts.csv ? `local CSV` : `Google Sheet (${tab})`;
-  console.log(`\n📄 Parsing ${source}...`);
-  const validRows = getValidRows(parseCSV(csvContent));
+  // ── One-time migration: merge old blog-state-tiktok.json into unified state ─
+  const tiktokStatePath = path.join(STAGAPPS_ROOT, "content", "blog-state-tiktok.json");
+  try {
+    const ttRaw: Record<string, any> = JSON.parse(await fs.readFile(tiktokStatePath, "utf-8"));
+    let migratedTT = 0;
+    for (const [code, ttEntry] of Object.entries(ttRaw)) {
+      if (!state[code]) {
+        // TikTok-only: move into unified state, rename youtube_hash → tiktok_hash
+        state[code] = { ...ttEntry, tiktok_hash: ttEntry.youtube_hash ?? "", youtube_hash: "" };
+        migratedTT++;
+      } else if (!state[code].tiktok_hash) {
+        // Already in YouTube state: just add tiktok_hash
+        state[code].tiktok_hash = ttEntry.youtube_hash ?? "";
+        migratedTT++;
+      }
+    }
+    if (migratedTT > 0) {
+      await saveState(state);
+      console.log(`   ✅ Merged ${migratedTT} TikTok state entries into unified state`);
+    }
+  } catch { /* no tiktok state file — skip */ }
+
+  // Ensure all entries have tiktok_hash (backward compat)
+  for (const entry of Object.values(state)) {
+    if (!("tiktok_hash" in entry)) (entry as any).tiktok_hash = "";
+  }
+
+  // Always fetch both tabs; --csv overrides YouTube tab only
+  const [ytCsvContent, ttCsvContent] = await Promise.all([
+    opts.csv
+      ? fs.readFile(path.resolve(opts.csv), "utf-8")
+      : fetchSheetCSV("youtube"),
+    fetchSheetCSV("tiktok"),
+  ]);
+  console.log(`\n📄 Merging YouTube + TikTok tabs...`);
+  const mergedRows = mergeTabRows(parseCSV(ytCsvContent), parseCSV(ttCsvContent));
+  const validRows = getValidRows(mergedRows);
   console.log(
     `   ${validRows.length} valid rows (skipping no-transcript & hard-skip codes)`,
   );
@@ -809,7 +903,7 @@ async function main() {
   // ── Migrate old state format (hash / title_hash → youtube_hash) ─────────────
   let migrated = 0;
   const csvMap = Object.fromEntries(
-    validRows.map((r) => [r["Video_code"]!, r]),
+    mergedRows.map((r) => [r["Video_code"]!, r]),
   );
   for (const [code, entry] of Object.entries(state)) {
     let dirty = false;
@@ -824,7 +918,7 @@ async function main() {
       try {
         hasIframe = /<iframe/i.test(await fs.readFile(mdPath, "utf-8"));
       } catch {}
-      const ytUrl = row?.["Published_link"]?.trim() ?? "";
+      const ytUrl = row?.["youtube_url"]?.trim() ?? "";
       // Force youtube update if link exists but not yet in markdown
       (entry as any).youtube_hash =
         ytUrl && !hasIframe ? "" : row ? hashYoutube(row) : "";
@@ -856,7 +950,7 @@ async function main() {
       console.log(`\n🆕 New [${code}]`);
       toRun.push({
         row,
-        flags: { isNew: true, youtubeChanged: false, thumbnailChanged: true },
+        flags: { isNew: true, youtubeChanged: false, tiktokChanged: false, thumbnailChanged: true },
       });
       continue;
     }
@@ -864,11 +958,13 @@ async function main() {
     const flags: ChangeFlags = {
       isNew: false,
       youtubeChanged: entry.youtube_hash !== hashYoutube(row),
+      tiktokChanged:  entry.tiktok_hash  !== hashTikTok(row),
       thumbnailChanged: entry.thumbnail_hash !== hashThumbnail(row),
     };
 
     const changes = [
       flags.youtubeChanged && "youtube",
+      flags.tiktokChanged && "tiktok",
       flags.thumbnailChanged && "thumbnail",
     ]
       .filter(Boolean)
@@ -938,7 +1034,7 @@ async function deployToStagapps(slugs: string[]): Promise<void> {
 
   // Stage blog content + state file
   git(`git add apps/stag/content/blog/bai-viet`);
-  git(`git add apps/stag/content/blog-state.json apps/stag/content/blog-state-tiktok.json 2>/dev/null || true`);
+  git(`git add apps/stag/content/blog-state.json`);
 
   const status = git(`git status --porcelain`);
   if (!status) {
@@ -950,7 +1046,7 @@ async function deployToStagapps(slugs: string[]): Promise<void> {
   git(`git commit -m "${title}"`);
   console.log(`   ✅ Committed`);
 
-  git(`git push origin ${branch} --force-with-lease`);
+  git(`git push -u origin ${branch} --force-with-lease`);
   console.log(`   ✅ Pushed`);
 
   const prUrl = gh(`gh pr create --title "${title}" --body "" --base main --head ${branch}`);
